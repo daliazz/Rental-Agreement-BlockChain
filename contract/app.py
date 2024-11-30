@@ -1,169 +1,379 @@
 import streamlit as st
 import requests
 
-# Set up the base URL for backend API
-BASE_URL = "http://localhost:5000"  # Change this to the address of your deployed backend
-ETH_TO_JOD_RATE = 1000  # Example conversion rate, adjust as per the latest exchange rate
+# Constants
+BASE_URL = "http://localhost:5000"  # Backend API URL
+ETH_TO_JOD_RATE = 1000  # Example conversion rate, adjust as needed
 
-# Define session state for user authentication
-if "user_role" not in st.session_state:
-    st.session_state.user_role = None
-if "wallet_address" not in st.session_state:
-    st.session_state.wallet_address = None
+# Initialize session state
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
+if "token" not in st.session_state:
+    st.session_state.token = None
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "wallet_address" not in st.session_state:
+    st.session_state.wallet_address = None
 
-# User Registration and Login
-st.title("Blockchain-Based Rental Agreement System")
+# Helper functions
+def login(email, password):
+    """Handles login and saves token on success."""
+    response = requests.post(f"{BASE_URL}/login", json={"email": email, "password": password})
+    if response.status_code == 200:
+        response_data = response.json()
+        st.session_state.token = response_data["token"]
+        st.session_state.user = response_data["user"]
+        st.session_state.wallet_address = response_data["user"]["wallet_address"]
+        st.session_state.logged_in = True
+        st.success(f"Welcome, {response_data['user']['name']}!")
+    else:
+        st.error(response.json().get("error", "Login failed."))
 
-if not st.session_state.logged_in:
-    menu = ["Login", "Register"]
-    choice = st.selectbox("Menu", menu)
+def logout():
+    """Clears session state for logout."""
+    st.session_state.logged_in = False
+    st.session_state.token = None
+    st.session_state.user = None
+    st.session_state.wallet_address = None
+    st.success("Logged out successfully!")
+    st.stop()
 
-    if choice == "Register":
-        st.header("Create an Account")
-        name = st.text_input("Full Name")
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        wallet_address = st.text_input("Ethereum Wallet Address")
-        role = st.selectbox("Select your role", ["Select", "Landlord", "Tenant"])
+def get_headers():
+    """Returns headers with Authorization token."""
+    return {"Authorization": f"Bearer {st.session_state.token}"} if st.session_state.token else {}
 
-        if st.button("Register"):
-            if name and email and password and wallet_address and role != "Select":
+def add_apartment(title, location, description, price_in_jod, lease_duration, availability, photos=None):
+    headers = get_headers()
+
+    # Calculate equivalent ETH price
+    JOD_TO_ETH_RATE = 0.001  # Ensure this matches the backend
+    rent_amount_eth = price_in_jod * JOD_TO_ETH_RATE
+
+    # Prepare form data
+    apartment_data = {
+        "landlord_wallet": st.session_state.wallet_address,
+        "title": title,
+        "location": location,
+        "description": description,
+        "price_in_jod": price_in_jod,
+        "lease_duration": lease_duration,
+        "availability": availability
+    }
+
+    # Prepare files
+    files = []
+    if photos:
+        for idx, photo in enumerate(photos):
+            files.append(('photos', (f'photo_{idx}.jpg', photo, 'image/jpeg')))
+
+    try:
+        # Display ETH price for confirmation
+        st.write(f"Price in ETH (converted): {rent_amount_eth:.6f} ETH")
+
+        response = requests.post(
+            f"{BASE_URL}/add-apartment",
+            data=apartment_data,
+            headers=headers,
+            files=files
+        )
+
+        if response.status_code == 200:
+            response_data = response.json()
+            st.success("Apartment listed successfully!")
+            st.write(f"**Smart Contract Address:** {response_data['contract_address']}") 
+            st.write(f"**Price in JOD:** {response_data['price_in_jod']} JOD")
+            st.write(f"**Price in ETH:** {response_data['rent_amount_eth']} ETH")
+        else:
+            st.error(response.json().get("error", "Failed to list apartment."))
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
+
+
+
+def edit_apartment(apartment_id, location, title, description, price_in_jod, lease_duration, availability, photos=None):
+    headers = get_headers()
+
+    apartment_data = {
+        "title": title,
+        "location": location,
+        "description": description,
+        "price_in_jod": price_in_jod,
+        "lease_duration": lease_duration,
+        "availability": availability
+    }
+
+    files = []
+    if photos:
+        for idx, photo in enumerate(photos):
+            files.append(('photos', (f'photo_{idx}.jpg', photo, 'image/jpeg')))
+
+    try:
+       
+        st.write(f"Uploading {len(files)} photos")
+
+        response = requests.put(
+            f"{BASE_URL}/edit-apartment/{apartment_id}",
+            data=apartment_data,
+            headers=headers,
+            files=files
+        )
+
+       
+
+        if response.status_code != 200:
+            
+            st.error(response.json().get("error", "Failed to update apartment."))
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
+
+
+
+def delete_apartment(apartment_id):
+    """Sends a request to delete an apartment."""
+    headers = get_headers()
+    response = requests.delete(f"{BASE_URL}/delete-apartment/{apartment_id}", headers=headers)
+    if response.status_code == 200:
+        
+         # Trigger a refresh of the apartment listings
+        st.session_state["refresh_apartments"] = True
+    else:
+        st.error(response.json().get("error", "Failed to delete apartment."))
+def sign_agreement(apartment_id, contract_address, rent_price_jod):
+    """Signs the agreement and processes payment using Zain Cash."""
+    headers = get_headers()
+    try:
+        # Sign the agreement
+        sign_data = {
+            "contract_address": contract_address,
+            "tenant_wallet": st.session_state.wallet_address
+        }
+        sign_response = requests.post(f"{BASE_URL}/sign-agreement", json=sign_data, headers=headers)
+        if sign_response.status_code == 200:
+            st.success("Agreement signed successfully. Proceeding to payment...")
+            # Create a Zain Cash payment
+            payment_data = {
+                "amount": str(int(rent_price_jod)),
+                "order_id": str(apartment_id),
+                "redirect_url": f"{BASE_URL}/zaincash-callback"
+            }
+            payment_response = requests.post(f"{BASE_URL}/create-payment", json=payment_data, headers=headers)
+            if payment_response.status_code == 200:
+                payment_url = payment_response.json().get("payment_url")
+                st.markdown(f"[Click here to pay with Zain Cash]({payment_url})", unsafe_allow_html=True)
+            else:
+                st.error(payment_response.json().get("error", "Failed to create payment."))
+        else:
+            st.error(sign_response.json().get("error", "Failed to sign agreement."))
+    except Exception as e:
+        st.error(f"An error occurred during the agreement signing process: {e}")
+
+def render_apartment_details(apartment):
+    """Displays details for a single apartment."""
+    st.image(apartment.get("image_url", "background.jpg"), use_container_width=True)
+    st.write(f"**Title:** {apartment['title']}")
+    st.write(f"**Location:** {apartment['location']}")
+    st.write(f"**Rent:** {apartment['rent_amount']} ETH")
+    rent_price_jod = apartment['rent_amount'] * ETH_TO_JOD_RATE
+    st.write(f"**Rent in JOD:** {rent_price_jod:.2f} JOD")
+    st.write(f"**Lease Duration:** {apartment['lease_duration']} months")
+    st.write(f"**Contract Address:** {apartment['contract_address']}")
+    if apartment["is_available"]:
+        if st.button(f"Rent {apartment['title']}"):
+            sign_agreement(apartment["id"], apartment["contract_address"], rent_price_jod)
+
+
+# Main Application
+st.set_page_config(page_title="Rental System", layout="wide")
+
+def landing_page():
+    st.image("background.jpg", use_container_width=True)
+    st.title("Welcome to the Rental System")
+    st.subheader("Your trusted platform for finding or renting apartments")
+
+    # Navigation bar
+    nav_options = ["Home", "About Us", "Contact Us", "Login/Register"]
+    choice = st.selectbox("Navigate", nav_options)
+
+    if choice == "Login/Register":
+        registration_form()
+
+def registration_form():
+    st.header("Register or Login")
+    col1, col2 = st.columns(2)
+
+    # Registration Form
+    with col1:
+        st.subheader("Register")
+        name = st.text_input("Name", key="register_name")
+        email = st.text_input("Email", key="register_email")
+        wallet_address = st.text_input("Ethereum Wallet Address", key="register_wallet")
+        phone = st.text_input("Phone Number", key="register_phone")
+        role = st.radio("Role", ["Tenant", "Landlord"], key="register_role")
+        password = st.text_input("Password", type="password", key="register_password")
+        if st.button("Register", key="register_button"):
+            if name and email and phone and password and role and wallet_address:
                 user_data = {
-                    "name": name,
-                    "email": email,
-                    "password": password,
-                    "wallet_address": wallet_address,
+                    "name": name.strip(),
+                    "email": email.strip(),
+                    "wallet_address": wallet_address.strip(),
+                    "phone": phone.strip(),
+                    "password": password.strip(),
                     "role": role
                 }
                 response = requests.post(f"{BASE_URL}/register", json=user_data)
                 if response.status_code == 200:
-                    st.success(f"Account created successfully as a {role}.")
+                    st.success("Registration successful! Please log in.")
                 else:
-                    st.error(f"Error: {response.json().get('error')}")
+                    st.error(response.json().get("error", "Registration failed."))
             else:
-                st.error("Please fill in all fields.")
+                st.warning("Please fill in all fields.")
 
-    elif choice == "Login":
-        st.header("Login")
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        if st.button("Login"):
+    # Login Form
+    with col2:
+        st.subheader("Login")
+        email = st.text_input("Login Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
+        if st.button("Login", key="login_button"):
             if email and password:
-                response = requests.post(f"{BASE_URL}/login", json={"email": email, "password": password})
-                if response.status_code == 200:
-                    try:
-                        response_data = response.json()
-                        if "user" in response_data:
-                            user_data = response_data["user"]
-                            if "role" in user_data and "wallet_address" in user_data:
-                                st.session_state.user_role = user_data["role"]
-                                st.session_state.wallet_address = user_data["wallet_address"]
-                                st.session_state.logged_in = True
-                                st.session_state.user_name = user_data["name"]
-                                st.success(f"Welcome, {user_data['name']}! You are logged in as a {user_data['role']}.")
-                            else:
-                                st.error("Unexpected user data structure. Missing 'role' or 'wallet_address' in user data.")
-                        else:
-                            st.error("Unexpected response structure. Missing 'user' key in response.")
-                    except requests.exceptions.JSONDecodeError:
-                        st.error("Failed to decode the response from the backend.")
-                else:
-                    try:
-                        error_message = response.json().get('error')
-                        st.error(f"Error: {error_message}")
-                    except requests.exceptions.JSONDecodeError:
-                        st.error(f"Error: Received an unexpected response: {response.text}")
+                login(email, password)
             else:
-                st.error("Please enter your email and password to login.")
+                st.warning("Please enter your email and password.")
 
-# If the user is logged in, display their respective dashboard
-if st.session_state.logged_in:
-    st.header(f"Welcome to your {st.session_state.user_role} Dashboard")
+def landlord_dashboard():
+    st.header(f"Welcome, {st.session_state.user['name']} (Landlord)")
+    tab1, tab2, tab3, tab4= st.tabs(["Add Apartment", "Manage Listings", "My Profile", "My Contracts"])
 
-    # Logout button
-    if st.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.user_role = None
-        st.session_state.wallet_address = None
-        st.session_state.user_name = None
-        # Instead of rerun, we rely on the conditions to render the correct view next time the user interacts.
+    # Add Apartment
+    with tab1:
+        st.subheader("Add a New Apartment")
+        title = st.text_input("Apartment Title", key="add_title")
+        location = st.text_input("Apartment Location", key="add_location")
+        description = st.text_area("Description", key="add_description")
+        price_in_jod = st.number_input("Monthly Rent (in JOD)", min_value=0.0, key="add_price_jod")
+        lease_duration = st.number_input("Lease Duration (in months)", min_value=1, key="add_duration")
+        availability = st.selectbox("Availability", ["Available", "Unavailable"], key="add_availability")
+        photos = st.file_uploader("Upload Apartment Photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="add_photos")
 
-    if st.session_state.user_role == "Tenant":
-        st.header("Tenant Dashboard: View Available Apartments")
-        response = requests.get(f"{BASE_URL}/available-apartments")
+        if st.button("List Apartment", key="list_apartment"):
+            if not photos:
+                st.warning("Please upload at least one photo before listing the apartment.")
+            else:
+                photo_data_list = [photo.read() for photo in photos]
+                add_apartment(title, location, description, price_in_jod, lease_duration, availability, photo_data_list)
+
+    # Manage Listings
+    with tab2:
+        st.subheader("Your Current Listings")
+        response = requests.get(f"{BASE_URL}/landlord-apartments", headers=get_headers())
         if response.status_code == 200:
             apartments = response.json()
-            if apartments:
-                for apt in apartments:
-                    st.subheader(f"Apartment {apt['id']}: {apt['description']}")
-                    st.write(f"Location: {apt['location']}")
-                    st.write(f"Rent: {apt['price']} ETH")
+            for apt in apartments:
+                st.write(f"**Title:** {apt['title']}")
+                if apt.get("photo_urls"):
+                    st.write("Photos:")
+                    for photo_url in apt["photo_urls"]:
+                        st.image(photo_url, width=300)
+                st.write(f"**Location:** {apt['location']}")
+                st.write(f"**Description:** {apt['description']}")
+                st.write(f"**Price in JOD:** {apt['price_in_jod']} JOD")
+                st.write(f"**Rent Amount:** {apt['rent_amount_eth']} ETH")
+                st.write(f"**Lease Duration:** {apt['lease_duration']} months")
+                st.write(f"**Availability:** {apt['availability']}")
+                st.write(f"**Contract Address:** {apt['contract_address']}")
 
-                    # Convert ETH price to Jordanian Dinar
-                    rent_price_jod = apt['price'] * ETH_TO_JOD_RATE
-                    st.write(f"Rent (in JOD): {rent_price_jod:.2f} JOD")
-
-                    if apt["is_available"]:
-                        if st.button(f"Rent Apartment {apt['id']}"):
-                            try:
-                                # Convert order_id to string
-                                order_id = str(apt['id'])
-                                
-                                # Convert rent_price_jod to a string
-                                amount_in_jod = str(int(rent_price_jod))
-
-                                # Create a payment using Zain Cash
-                                payment_data = {
-                                    "amount": amount_in_jod,  # Ensure amount is a string
-                                    "order_id": order_id,  # Ensure order ID is a string
-                                    "redirect_url": f"{BASE_URL}/zaincash-callback"  # Redirect URL must be a string
-                                }
-
-                                # Make the request to the back-end to create a payment
-                                payment_response = requests.post(f"{BASE_URL}/create-payment", json=payment_data)
-
-                                # Check the response from the backend
-                                if payment_response.status_code == 200:
-                                    payment_url = payment_response.json()["payment_url"]
-                                    st.markdown(f"[Click here to pay with Zain Cash]({payment_url})", unsafe_allow_html=True)
-                                else:
-                                    try:
-                                        error_message = payment_response.json().get('error')
-                                        st.error(f"Error: {error_message}")
-                                    except requests.exceptions.JSONDecodeError:
-                                        st.error(f"Error: Received an unexpected response: {payment_response.text}")
-
-                            except Exception as e:
-                                st.error(f"Error occurred while processing payment: {e}")
-            else:
-                st.info("No apartments available for rent at the moment.")
+                if f"edit_form_visible_{apt['id']}" not in st.session_state:
+                    st.session_state[f"edit_form_visible_{apt['id']}"] = False
+                if st.button(f"Edit {apt['title']}", key=f"edit_{apt['id']}"):
+                    st.session_state[f"edit_form_visible_{apt['id']}"] = not st.session_state[f"edit_form_visible_{apt['id']}"]
+                if st.session_state[f"edit_form_visible_{apt['id']}"]:
+                    with st.form(f"edit_form_{apt['id']}"):
+                        new_title = st.text_input("Apartment Title", value=apt["title"])
+                        new_location = st.text_input("Apartment Location", value=apt["location"])
+                        new_description = st.text_area("Description", value=apt["description"])
+                        new_price_in_jod = st.number_input("Price in JOD", value=apt["price_in_jod"], min_value=0.0)
+                        new_lease_duration = st.number_input("Lease Duration (in months)", value=apt["lease_duration"], min_value=1)
+                        new_availability = st.selectbox("Availability", ["Available", "Unavailable"], index=0 if apt["availability"] == "Available" else 1)
+                        new_photos = st.file_uploader("Upload New Photos (Optional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+                        submitted = st.form_submit_button("Save Changes")
+                        if submitted:
+                            photo_data = [photo.getvalue() for photo in new_photos] if new_photos else None
+                            edit_apartment(
+                                apt["id"], new_location, new_title, new_description,
+                                new_price_in_jod, new_lease_duration, new_availability, photo_data
+                            )
+                            st.success(f"Apartment \"{new_title}\" updated successfully!")
+                            st.session_state[f"edit_form_visible_{apt['id']}"] = False
+                if st.button(f"Delete {apt['title']}", key=f"delete_{apt['id']}"):
+                    delete_apartment(apt["id"])
+                    st.success(f"Apartment \"{apt['title']}\" deleted successfully!")
         else:
+            st.error("Failed to load your listings.")
+
+    # My Profile
+    with tab3:
+        st.subheader("My Profile")
+        user = st.session_state.user
+
+        # Display current user details
+        name = st.text_input("Name", value=user["name"])
+        email = st.text_input("Email", value=user["email"], disabled=True)  # Email cannot be changed
+        wallet_address = st.text_input("Ethereum Wallet Address", value=user["wallet_address"], disabled=True)
+        phone = st.text_input("Phone Number", value=user["phone"])
+
+        # Button to save profile changes
+        if st.button("Save Profile Changes"):
+            # Make API call to update user profile
             try:
-                error_message = response.json().get('error')
-                st.error(f"Failed to load apartments. Error: {error_message}")
-            except requests.exceptions.JSONDecodeError:
-                st.error(f"Failed to load apartments. Received an unexpected response: {response.text}")
-
-    elif st.session_state.user_role == "Landlord":
-        st.header("Landlord Dashboard: Add Apartment for Rent")
-        description = st.text_area("Apartment Description")
-        location = st.text_input("Apartment Location")
-        price = st.number_input("Rent Price (ETH)", min_value=0.0)
-
-        if st.button("Add Apartment"):
-            if description and location and price > 0:
-                apartment_data = {
-                    "landlord_wallet": st.session_state.wallet_address,
-                    "description": description,
-                    "location": location,
-                    "price": price
-                }
-                response = requests.post(f"{BASE_URL}/add-apartment", json=apartment_data)
+                response = requests.put(
+                    f"{BASE_URL}/update-profile",
+                    headers=get_headers(),
+                    json={
+                        "name": name,
+                        "phone": phone
+                    }
+                )
                 if response.status_code == 200:
-                    st.success("Apartment listed successfully!")
+                    st.success("Profile updated successfully!")
+                    # Update session state
+                    st.session_state.user["name"] = name
+                    st.session_state.user["phone"] = phone
                 else:
-                    st.error(f"Error: {response.json().get('error')}")
-            else:
-                st.error("Please provide all the apartment details.")
+                    st.error(response.json().get("error", "Failed to update profile."))
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {e}")
+    # My Contracts Tab
+    with tab4:
+        st.write(f"Under Construction")
+
+
+
+def tenant_dashboard():
+    st.header(f"Welcome, {st.session_state.user['name']} (Tenant)")
+    tab1, tab2 = st.tabs(["Available Apartments", "My Contracts"])
+
+    # Available Apartments
+    with tab1:
+        st.subheader("Browse Available Apartments")
+        response = requests.get(f"{BASE_URL}/available-apartments", headers=get_headers())
+        if response.status_code == 200:
+            apartments = response.json()
+            for apt in apartments:
+                st.write(f"**{apt['title']}** - {apt['rent_amount']} ETH")
+                render_apartment_details(apt)
+        else:
+            st.error("Failed to load apartments.")
+
+    # My Contracts
+    with tab2:
+        st.subheader("My Contracts")
+        st.write("Feature under development.")
+
+# Routing Logic
+if not st.session_state.get("logged_in", False):
+    landing_page()
+else:
+    role = st.session_state.user["role"]
+    if role == "Landlord":
+        landlord_dashboard()
+    elif role == "Tenant":
+        tenant_dashboard()
