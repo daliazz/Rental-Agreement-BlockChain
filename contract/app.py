@@ -185,59 +185,76 @@ def render_apartment_details(apartment):
 # Main Application
 st.set_page_config(page_title="Rental System", layout="wide")
 
+# Login Form
+def login_form():
+    st.subheader("Login")
+    email = st.text_input("Email", key="login_email")
+    password = st.text_input("Password", type="password", key="login_password")
+    if st.button("Login", key="login_button"):
+        if email and password:
+            login(email, password)
+        else:
+            st.warning("Please enter your email and password.")
+
+# Register Form
+def register_form():
+    st.subheader("Register")
+    name = st.text_input("Name", key="register_name")
+    email = st.text_input("Email", key="register_email")
+    wallet_address = st.text_input("Ethereum Wallet Address", key="register_wallet")
+    phone = st.text_input("Phone Number", key="register_phone")
+    password = st.text_input("Password", type="password", key="register_password")
+    role = st.radio("Role", ["Tenant", "Landlord"], key="register_role")
+
+    if st.button("Register", key="register_button"):
+        if name and email and phone and password and role and wallet_address:
+            user_data = {
+                "name": name.strip(),
+                "email": email.strip(),
+                "wallet_address": wallet_address.strip(),
+                "phone": phone.strip(),
+                "password": password.strip(),
+                "role": role
+            }
+            response = requests.post(f"{BASE_URL}/register", json=user_data)
+            if response.status_code == 200:
+                st.success("Registration successful! Please log in.")
+            else:
+                st.error(response.json().get("error", "Registration failed."))
+        else:
+            st.warning("Please fill in all fields.")
+
+# Landing Page
 def landing_page():
     st.image("background.jpg", use_container_width=True)
     st.title("Welcome to the Rental System")
     st.subheader("Your trusted platform for finding or renting apartments")
 
-    # Navigation bar
-    nav_options = ["Home", "About Us", "Contact Us", "Login/Register"]
-    choice = st.selectbox("Navigate", nav_options)
+    # Reordered navigation tabs
+    tabs = st.tabs(["About Us", "Home", "Login", "Register", "Contact Us"])
 
-    if choice == "Login/Register":
-        registration_form()
+    with tabs[0]:  # About Us Tab
+        st.title("About Us")
+        st.write("""
+        Welcome to our Rental Agreement Platform, where we simplify rental processes for both tenants and landlords. We believe in transparency, security, and efficiency in every transaction. Our platform leverages blockchain technology to ensure non-reputation of contracts while using familiar payment methods like Zain Cash and Metamask wallet to make renting accessible to everyone.
 
-def registration_form():
-    st.header("Register or Login")
-    col1, col2 = st.columns(2)
+        Whether you’re a landlord looking to easily manage your property listings or a tenant searching for your next home, our system is designed to provide a seamless experience. By integrating blockchain to record all agreements and payments, we guarantee the safety and reliability of every interaction.
 
-    # Registration Form
-    with col1:
-        st.subheader("Register")
-        name = st.text_input("Name", key="register_name")
-        email = st.text_input("Email", key="register_email")
-        wallet_address = st.text_input("Ethereum Wallet Address", key="register_wallet")
-        phone = st.text_input("Phone Number", key="register_phone")
-        role = st.radio("Role", ["Tenant", "Landlord"], key="register_role")
-        password = st.text_input("Password", type="password", key="register_password")
-        if st.button("Register", key="register_button"):
-            if name and email and phone and password and role and wallet_address:
-                user_data = {
-                    "name": name.strip(),
-                    "email": email.strip(),
-                    "wallet_address": wallet_address.strip(),
-                    "phone": phone.strip(),
-                    "password": password.strip(),
-                    "role": role
-                }
-                response = requests.post(f"{BASE_URL}/register", json=user_data)
-                if response.status_code == 200:
-                    st.success("Registration successful! Please log in.")
-                else:
-                    st.error(response.json().get("error", "Registration failed."))
-            else:
-                st.warning("Please fill in all fields.")
+        Join us today to experience a modern, hassle-free way to rent and manage properties, with the assurance of cutting-edge technology securing your interests.
+        """)
 
-    # Login Form
-    with col2:
-        st.subheader("Login")
-        email = st.text_input("Login Email", key="login_email")
-        password = st.text_input("Password", type="password", key="login_password")
-        if st.button("Login", key="login_button"):
-            if email and password:
-                login(email, password)
-            else:
-                st.warning("Please enter your email and password.")
+    with tabs[1]:  # Home Tab
+        st.write("Welcome to the home page! Find apartments or learn more about our platform.")
+
+    with tabs[2]:  # Login Tab
+        login_form()
+
+    with tabs[3]:  # Register Tab
+        register_form()
+
+    with tabs[4]:  # Contact Us Tab
+        st.write("Contact Us: Reach out at support@rentalsystem.com or call +123456789.")
+
 
 def landlord_dashboard():
     st.header(f"Welcome, {st.session_state.user['name']} (Landlord)")
@@ -349,25 +366,88 @@ def landlord_dashboard():
 
 def tenant_dashboard():
     st.header(f"Welcome, {st.session_state.user['name']} (Tenant)")
-    tab1, tab2 = st.tabs(["Available Apartments", "My Contracts"])
-
+    tab1, tab2, tab3 = st.tabs(["Available Apartments", "My Contracts", "My Profile"])
+    
     # Available Apartments
     with tab1:
         st.subheader("Browse Available Apartments")
-        response = requests.get(f"{BASE_URL}/available-apartments", headers=get_headers())
-        if response.status_code == 200:
-            apartments = response.json()
-            for apt in apartments:
-                st.write(f"**{apt['title']}** - {apt['rent_amount']} ETH")
-                render_apartment_details(apt)
-        else:
-            st.error("Failed to load apartments.")
+        try:
+            response = requests.get(f"{BASE_URL}/available-apartments", headers=get_headers())
+            
+            if response.status_code == 200:
+                apartments = response.json()
+                
+                if not apartments:
+                    st.info("No apartments are currently available.")
+                
+                for apt in apartments:
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"**{apt['title']}**")
+                        st.write(f"Location: {apt.get('location', 'N/A')}")
+                        st.write(f"Description: {apt.get('description', 'No description')}")
+                        st.write(f"Lease Duration: {apt.get('lease_duration', 'N/A')} months")
+                    
+                    with col2:
+                        st.write(f"Price: {apt.get('price_in_jod', 'N/A')} JOD")
+                        st.write(f"Rent in ETH: {apt.get('rent_amount_eth', 'N/A')} ETH")
+                    
+                    # Display apartment photos
+                    if apt.get('photo_urls'):
+                        st.image(apt['photo_urls'], width=200)
+                    
+                    st.button(f"Rent Apartment - {apt['id']}", key=f"rent_{apt['id']}")
+                    st.markdown("---")
+            
+            else:
+                st.error(f"Failed to load apartments. Error: {response.text}")
+        
+        except requests.RequestException as e:
+            st.error(f"Network error occurred: {e}")
+        except Exception as e:
+            st.error(f"An unexpected error occurred: {e}")
 
     # My Contracts
     with tab2:
         st.subheader("My Contracts")
-        st.write("Feature under development.")
+        st.info("Contract functionality coming soon!")
 
+    # My Profile
+    with tab3:
+        st.subheader("My Profile")
+        user = st.session_state.user
+
+        # Display current user details
+        name = st.text_input("Name", value=user["name"])
+        email = st.text_input("Email", value=user["email"], disabled=True)  # Email cannot be changed
+        wallet_address = st.text_input("Ethereum Wallet Address", value=user["wallet_address"], disabled=True)
+        phone = st.text_input("Phone Number", value=user["phone"])
+
+        # Button to save profile changes
+        if st.button("Save Profile Changes"):
+            # Make API call to update user profile
+            try:
+                response = requests.put(
+                    f"{BASE_URL}/update-profile",
+                    headers=get_headers(),
+                    json={
+                        "name": name,
+                        "phone": phone
+                    }
+                )
+                
+                if response.status_code == 200:
+                    st.success("Profile updated successfully!")
+                    # Update session state
+                    st.session_state.user["name"] = name
+                    st.session_state.user["phone"] = phone
+                else:
+                    st.error(response.json().get("error", "Failed to update profile."))
+            
+            except requests.RequestException as e:
+                st.error(f"Network error: {e}")
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {e}")
 # Routing Logic
 if not st.session_state.get("logged_in", False):
     landing_page()

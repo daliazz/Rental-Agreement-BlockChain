@@ -483,47 +483,51 @@ def landlord_apartments():
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-
 @app.route('/available-apartments', methods=['GET'])
 def available_apartments():
     try:
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
 
-        # Fetch apartments and join photos
+        # Query apartments and fetch photos separately
         cursor.execute('''
-            SELECT a.id, a.landlord_wallet, a.title, a.location, a.description, a.rent_amount,
-                   a.lease_duration, a.availability, a.contract_address, 
-                   GROUP_CONCAT(p.photo_url) AS photos
-            FROM apartments a
-            LEFT JOIN apartment_photos p ON a.id = p.apartment_id
-            WHERE a.availability = "Available"
-            GROUP BY a.id
+            SELECT id, landlord_wallet, title, location, description, price_in_jod, 
+                   rent_amount_eth, lease_duration, availability, contract_address
+            FROM apartments WHERE availability = "Available"
         ''')
         apartments = cursor.fetchall()
-        conn.close()
 
-        # Format the response to include all photo URLs
-        apartments_list = [
-            {
-                "id": apt[0],
+        apartments_list = []
+        for apt in apartments:
+            apt_id = apt[0]
+            cursor.execute('SELECT photo_url FROM apartment_photos WHERE apartment_id = ?', (apt_id,))
+            photos = cursor.fetchall()
+            photo_urls = [photo[0] for photo in photos]  # Extract photo URLs
+
+            apartments_list.append({
+                "id": apt_id,
                 "landlord_wallet": apt[1],
                 "title": apt[2],
                 "location": apt[3],
                 "description": apt[4],
-                "rent_amount": apt[5],
-                "lease_duration": apt[6],
-                "availability": apt[7],
-                "contract_address": apt[8],
-                "photos": apt[9].split(",") if apt[9] else []  # Split photo URLs into a list
-            }
-            for apt in apartments
-        ]
+                "price_in_jod": apt[5],
+                "rent_amount_eth": apt[6],
+                "lease_duration": apt[7],
+                "availability": apt[8],
+                "contract_address": apt[9],
+                "photo_urls": photo_urls  # Include photo URLs in the response
+            })
 
+        conn.close()
         return jsonify(apartments_list), 200
 
+    except sqlite3.Error as db_err:
+        print(f"Database error: {str(db_err)}")
+        return jsonify({"error": "Database error"}), 500
+
     except Exception as e:
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        print(f"Error fetching apartments: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/uploads/<filename>')
