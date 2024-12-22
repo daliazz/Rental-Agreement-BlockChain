@@ -38,20 +38,27 @@ if not web3.is_connected():
 PRIVATE_KEY = os.getenv('PRIVATE_KEY')
 ACCOUNT_ADDRESS = web3.eth.account.from_key(PRIVATE_KEY).address
 
-# Get the nonce Represents the number of transactions sent from the account. 
-# This value is required to prevent double-spending and to create a unique transaction.
-
+# Get the nonce Represents the number of transactions sent from the account.
 nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
 
 # Create the contract instance for deployment
 RentalAgreement = web3.eth.contract(abi=abi, bytecode=bytecode)
 
+# Replace constructor arguments to match your contract
+landlord_wallet = Web3.to_checksum_address(os.getenv('LANDLORD_WALLET'))  # Ensure this is provided
+rent_amount = int(os.getenv('RENT_AMOUNT'))  # Rent amount in Wei
+lease_duration = int(os.getenv('LEASE_DURATION'))  # Lease duration in months
+
 # Build transaction for deploying the contract
-transaction = RentalAgreement.constructor().build_transaction({
+transaction = RentalAgreement.constructor(
+    landlord_wallet,  # Landlord address
+    rent_amount,      # Rent amount (Wei)
+    lease_duration    # Lease duration (months)
+).build_transaction({
     'from': ACCOUNT_ADDRESS,
     'nonce': nonce,
-    'gas': 1500000,  # Adjust gas limit as needed
-    'gasPrice': web3.to_wei('30', 'gwei')  # Adjust gas price as needed
+    'gas': 3000000,  # Adjust gas limit as needed
+    'gasPrice': web3.to_wei('20', 'gwei')  # Adjust gas price as needed
 })
 
 # Sign the transaction
@@ -72,23 +79,4 @@ print(f"Contract deployed at address: {contract_address}")
 with open('contract_address.txt', 'w') as file:
     file.write(contract_address)
 
-# Create the contract instance at the deployed address
-rental_agreement = web3.eth.contract(address=contract_address, abi=abi)
-
-# Example: Set Rent Amount and Lease Duration in a Single Call
-rent_amount = 1000  # Example rent amount
-lease_duration = 12  # Example lease duration in months
-
-# Build transaction to set agreement details
-set_agreement_tx = rental_agreement.functions.setAgreementDetails(rent_amount, lease_duration).build_transaction({
-    'from': ACCOUNT_ADDRESS,
-    'nonce': web3.eth.get_transaction_count(ACCOUNT_ADDRESS),
-    'gas': 150000,
-    'gasPrice': web3.to_wei('30', 'gwei')
-})
-
-# Sign and send the transaction
-signed_agreement_tx = web3.eth.account.sign_transaction(set_agreement_tx, private_key=PRIVATE_KEY)
-agreement_tx_hash = web3.eth.send_raw_transaction(signed_agreement_tx.raw_transaction)
-
-print(f"Setting agreement details... Transaction hash: {web3.to_hex(agreement_tx_hash)}")
+print("Deployment completed successfully.")

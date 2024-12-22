@@ -2,80 +2,91 @@
 pragma solidity ^0.8.0;
 
 contract RentalAgreement {
-    address public owner;
     address public tenant;
+    address public landlord;
     uint256 public rentAmount;
-    uint256 public leaseDuration;
+    uint256 public leaseDuration; // in months
+    uint256 public startDate;
     bool public isSigned;
 
-    struct Agreement {
-        uint256 apartmentId;
-        bytes32 agreementHash;
-        bytes32 userIdHash;
-        uint256 timestamp;
-    }
+    enum ContractState { Pending, Active, Completed, Terminated }
+    ContractState public state;
 
-    struct Payment {
-        uint256 amount;
-        uint256 timestamp;
-    }
+    event AgreementCreated(address indexed tenant, address indexed landlord, uint256 rentAmount, uint256 leaseDuration);
+    event AgreementSigned(address indexed signer);
+    event PaymentMade(address indexed tenant, uint256 amount);
+    event AgreementCompleted();
+    event AgreementTerminated(address indexed terminatedBy, uint256 terminationDate);
 
-    mapping(uint256 => Agreement) public agreements;
-    Payment[] public paymentHistory;
-
-    event AgreementRecorded(uint256 indexed apartmentId, bytes32 agreementHash, bytes32 userIdHash, uint256 timestamp);
-    event PaymentRecorded(uint256 amount, uint256 timestamp);
-
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner can call this function.");
+    modifier onlyLandlord() {
+        require(msg.sender == landlord, "Only landlord can perform this action.");
         _;
     }
 
-    constructor() {
-        owner = msg.sender;
+    modifier onlyTenant() {
+        require(msg.sender == tenant, "Only tenant can perform this action.");
+        _;
     }
 
-    function setRentAmount(uint256 _rentAmount) public onlyOwner {
-        rentAmount = _rentAmount;
-    }
+constructor(address _landlord, uint256 _rentAmount, uint256 _leaseDuration) {
+    landlord = _landlord;
+    rentAmount = _rentAmount;
+    leaseDuration = _leaseDuration;
+    state = ContractState.Pending;
+    emit AgreementCreated(address(0), _landlord, _rentAmount, _leaseDuration);
+}
 
-    function setLeaseDuration(uint256 _leaseDuration) public onlyOwner {
-        leaseDuration = _leaseDuration;
-    }
 
-    // New function to set rent amount and lease duration in one call
-    function setAgreementDetails(uint256 _rentAmount, uint256 _leaseDuration) public onlyOwner {
-        rentAmount = _rentAmount;
-        leaseDuration = _leaseDuration;
-    }
+ function signAgreement() public {
+    require(state == ContractState.Pending, "Agreement not in pending state.");
 
-    function recordAgreement(
-        uint256 _apartmentId,
-        bytes32 _agreementHash,
-        bytes32 _userIdHash
-    ) public onlyOwner {
-        agreements[_apartmentId] = Agreement(
-            _apartmentId,
-            _agreementHash,
-            _userIdHash,
-            block.timestamp
-        );
-        emit AgreementRecorded(_apartmentId, _agreementHash, _userIdHash, block.timestamp);
-    }
-
-    function signAgreement(address _tenant) public onlyOwner {
-        require(!isSigned, "Agreement already signed.");
-        tenant = _tenant;
+    if (msg.sender == landlord && !isSigned) {
         isSigned = true;
+    } else if (msg.sender == tenant && tenant != address(0)) {
+        require(tenant == msg.sender, "Only the designated tenant can sign.");
+    } else {
+        revert("Unauthorized signer.");
     }
 
-    function recordPayment(uint256 _amount) public {
-        require(msg.sender == tenant, "Only tenant can make payments.");
-        paymentHistory.push(Payment(_amount, block.timestamp));
-        emit PaymentRecorded(_amount, block.timestamp);
+    emit AgreementSigned(msg.sender);
+
+    // Transition to Active only when both parties sign
+    if (tenant != address(0) && isSigned) {
+        state = ContractState.Active;
+        startDate = block.timestamp;
+    }
+}
+
+
+    function makePayment() public payable onlyTenant {
+        require(state == ContractState.Active, "Agreement is not active.");
+        require(msg.value == rentAmount, "Incorrect rent amount.");
+
+        payable(landlord).transfer(msg.value);
+        emit PaymentMade(msg.sender, msg.value);
+
+        uint256 monthsElapsed = (block.timestamp - startDate) / 30 days;
+        if (monthsElapsed >= leaseDuration) {
+            state = ContractState.Completed;
+            emit AgreementCompleted();
+        }
     }
 
-    function getAgreement(uint256 _apartmentId) public view returns (Agreement memory) {
-        return agreements[_apartmentId];
+    function terminateAgreement() public {
+        require(state == ContractState.Pending || state == ContractState.Active, "Agreement cannot be terminated.");
+        require(msg.sender == landlord || msg.sender == tenant, "Only landlord or tenant can terminate.");
+
+        if (state == ContractState.Active) {
+            uint256 monthsElapsed = (block.timestamp - startDate) / 30 days;
+            uint256 remainingMonths = leaseDuration > monthsElapsed ? leaseDuration - monthsElapsed : 0;
+
+            if (remainingMonths > 0 && msg.sender == landlord) {
+                uint256 refundAmount = remainingMonths * rentAmount;
+                payable(tenant).transfer(refundAmount);
+            }
+        }
+
+        state = ContractState.Terminated;
+        emit AgreementTerminated(msg.sender, block.timestamp);
     }
 }

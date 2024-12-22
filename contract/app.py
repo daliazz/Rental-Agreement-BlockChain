@@ -80,7 +80,6 @@ def add_apartment(title, location, description, price_in_jod, lease_duration, av
         if response.status_code == 200:
             response_data = response.json()
             st.success("Apartment listed successfully!")
-            st.write(f"**Smart Contract Address:** {response_data['contract_address']}") 
             st.write(f"**Price in JOD:** {response_data['price_in_jod']} JOD")
             st.write(f"**Price in ETH:** {response_data['rent_amount_eth']} ETH")
         else:
@@ -138,34 +137,71 @@ def delete_apartment(apartment_id):
         st.session_state["refresh_apartments"] = True
     else:
         st.error(response.json().get("error", "Failed to delete apartment."))
-def sign_agreement(apartment_id, contract_address, rent_price_jod):
-    """Signs the agreement and processes payment using Zain Cash."""
-    headers = get_headers()
-    try:
-        # Sign the agreement
-        sign_data = {
-            "contract_address": contract_address,
-            "tenant_wallet": st.session_state.wallet_address
-        }
-        sign_response = requests.post(f"{BASE_URL}/sign-agreement", json=sign_data, headers=headers)
-        if sign_response.status_code == 200:
-            st.success("Agreement signed successfully. Proceeding to payment...")
-            # Create a Zain Cash payment
-            payment_data = {
-                "amount": str(int(rent_price_jod)),
-                "order_id": str(apartment_id),
-                "redirect_url": f"{BASE_URL}/zaincash-callback"
-            }
-            payment_response = requests.post(f"{BASE_URL}/create-payment", json=payment_data, headers=headers)
-            if payment_response.status_code == 200:
-                payment_url = payment_response.json().get("payment_url")
-                st.markdown(f"[Click here to pay with Zain Cash]({payment_url})", unsafe_allow_html=True)
+
+def sign_agreement(apartment_id, role):
+    """Handle agreement signing with proper state management."""
+    
+    # Create unique keys for this specific agreement
+    form_key = f"sign_agreement_form_{apartment_id}_{role}"
+    
+    # Create container for the form
+    form_container = st.empty()
+    
+    with form_container.container():
+        with st.form(key=form_key):
+            st.write(f"Sign agreement for Apartment {apartment_id} as {role}")
+            
+            # Private key input
+            private_key = st.text_input("Enter your private key", type="password")
+            
+            # Submit button
+            submitted = st.form_submit_button("Sign Agreement", use_container_width=True)
+            
+        
+        # Debugging session state and submitted button
+        st.write(f"Session State: {st.session_state}")
+        st.write(f"Form Submitted: {submitted}")
+        
+        if submitted:
+            st.write("Button clicked")  # Debugging output
+            
+            if private_key:
+                try:
+                    # Show processing message
+                    with st.spinner("Processing signature..."):
+                        payload = {
+                            "apartment_id": apartment_id,
+                            "wallet_address": st.session_state.get('wallet_address', 'No wallet found'),
+                            "role": role,
+                            "private_key": private_key
+                        }
+                        
+                        # Debugging payload
+                        st.write(f"Payload: {payload}")
+                        
+                        response = requests.post(
+                            f"{BASE_URL}/contracts/sign",
+                            json=payload,
+                            headers=get_headers()
+                        )
+                        
+                        # Debugging response
+                        st.write(f"Response Status Code: {response.status_code}")
+                        st.write(f"Response JSON: {response.json()}")
+                        
+                        if response.status_code == 200:
+                            form_container.empty()
+                            st.success("✅ Agreement signed successfully!")
+                        else:
+                            st.error(f"Failed to sign: {response.json().get('error', 'Unknown error')}")
+                except Exception as e:
+                    # Debugging exception
+                    st.error(f"Error occurred: {str(e)}")
+                    st.write(f"Exception Details: {e}")
             else:
-                st.error(payment_response.json().get("error", "Failed to create payment."))
-        else:
-            st.error(sign_response.json().get("error", "Failed to sign agreement."))
-    except Exception as e:
-        st.error(f"An error occurred during the agreement signing process: {e}")
+                # Warning for empty private key
+                st.warning("Please enter your private key")
+
 
 def render_apartment_details(apartment):
     """Displays details for a single apartment."""
@@ -176,11 +212,62 @@ def render_apartment_details(apartment):
     rent_price_jod = apartment['rent_amount'] * ETH_TO_JOD_RATE
     st.write(f"**Rent in JOD:** {rent_price_jod:.2f} JOD")
     st.write(f"**Lease Duration:** {apartment['lease_duration']} months")
-    st.write(f"**Contract Address:** {apartment['contract_address']}")
     if apartment["is_available"]:
         if st.button(f"Rent {apartment['title']}"):
             sign_agreement(apartment["id"], apartment["contract_address"], rent_price_jod)
 
+
+def fetch_contracts(endpoint):
+    response = requests.get(f"{BASE_URL}/{endpoint}", headers=get_headers())
+
+    if response.status_code == 200:
+        try:
+            return response.json()
+        except ValueError:
+            st.error("Invalid JSON response from server.")
+            return []
+    else:
+        st.error(f"API Error {response.status_code}: {response.text}")
+        return []
+
+def sign_contract(apartment_id, role):
+    payload = {
+        "apartment_id": apartment_id,
+        "wallet_address": st.session_state.wallet_address,
+        "role": role
+    }
+    response = requests.post(f"{BASE_URL}/contracts/sign", json=payload, headers=get_headers())
+    if response.status_code == 200:
+        st.success("Contract signed successfully.")
+    else:
+        st.error(response.json().get("error", "Failed to sign contract."))
+
+def make_payment(apartment_id, amount):
+    payload = {
+        "apartment_id": apartment_id,
+        "payment_amount": amount
+    }
+    try:
+        response = requests.post(f"{BASE_URL}/contracts/pay", json=payload, headers=get_headers())
+        if response.status_code == 200:
+            st.success("Payment made successfully!")
+        else:
+            st.error(response.json().get("error", "Failed to make payment."))
+    except Exception as e:
+        st.error(f"An error occurred while making payment: {e}")
+
+def terminate_contract(apartment_id):
+    payload = {
+        "apartment_id": apartment_id
+    }
+    try:
+        response = requests.post(f"{BASE_URL}/contracts/terminate", json=payload, headers=get_headers())
+        if response.status_code == 200:
+            st.success("Contract terminated successfully!")
+        else:
+            st.error(response.json().get("error", "Failed to terminate contract."))
+    except Exception as e:
+        st.error(f"An error occurred while terminating the contract: {e}")
 
 # Main Application
 st.set_page_config(page_title="Rental System", layout="wide")
@@ -258,7 +345,7 @@ def landing_page():
 
 def landlord_dashboard():
     st.header(f"Welcome, {st.session_state.user['name']} (Landlord)")
-    tab1, tab2, tab3, tab4= st.tabs(["Add Apartment", "Manage Listings", "My Profile", "My Contracts"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Add Apartment", "Manage Listings", "My Profile", "My Contracts"])
 
     # Add Apartment
     with tab1:
@@ -296,7 +383,6 @@ def landlord_dashboard():
                 st.write(f"**Rent Amount:** {apt['rent_amount_eth']} ETH")
                 st.write(f"**Lease Duration:** {apt['lease_duration']} months")
                 st.write(f"**Availability:** {apt['availability']}")
-                st.write(f"**Contract Address:** {apt['contract_address']}")
 
                 if f"edit_form_visible_{apt['id']}" not in st.session_state:
                     st.session_state[f"edit_form_visible_{apt['id']}"] = False
@@ -358,28 +444,47 @@ def landlord_dashboard():
                     st.error(response.json().get("error", "Failed to update profile."))
             except Exception as e:
                 st.error(f"An unexpected error occurred: {e}")
+
     # My Contracts Tab
     with tab4:
-        st.write(f"Under Construction")
+        tab1, tab2 = st.tabs(["Pending Contracts", "Signed Contracts"])
+
+        with tab1:
+            st.subheader("Pending Contracts")
+            contracts = fetch_contracts("landlord-contracts?status=pending")
+            for contract in contracts:
+                st.write(f"**Tenant Wallet:** {contract['tenant_wallet']}")
+                st.write(f"**Apartment ID:** {contract['apartment_id']}")
+                if st.button(f"Sign Contract #{contract['id']}", key=f"sign_{contract['id']}"):
+                     sign_agreement(contract['apartment_id'], "Landlord")
+
+        with tab2:
+            st.subheader("Signed Contracts")
+            contracts = fetch_contracts("landlord-contracts?status=Landlord Signed")
+            for contract in contracts:
+                st.write(f"**Tenant Wallet:** {contract['tenant_wallet']}")
+                st.write(f"**Apartment ID:** {contract['apartment_id']}")
+                st.write(f"**Status:** {contract['status']}")
+
 
 
 
 def tenant_dashboard():
     st.header(f"Welcome, {st.session_state.user['name']} (Tenant)")
     tab1, tab2, tab3 = st.tabs(["Available Apartments", "My Contracts", "My Profile"])
-    
+
     # Available Apartments
     with tab1:
         st.subheader("Browse Available Apartments")
         try:
             response = requests.get(f"{BASE_URL}/available-apartments", headers=get_headers())
-            
+
             if response.status_code == 200:
                 apartments = response.json()
-                
+
                 if not apartments:
                     st.info("No apartments are currently available.")
-                
+
                 for apt in apartments:
                     col1, col2 = st.columns([3, 1])
                     with col1:
@@ -387,21 +492,45 @@ def tenant_dashboard():
                         st.write(f"Location: {apt.get('location', 'N/A')}")
                         st.write(f"Description: {apt.get('description', 'No description')}")
                         st.write(f"Lease Duration: {apt.get('lease_duration', 'N/A')} months")
-                    
+
                     with col2:
                         st.write(f"Price: {apt.get('price_in_jod', 'N/A')} JOD")
                         st.write(f"Rent in ETH: {apt.get('rent_amount_eth', 'N/A')} ETH")
-                    
+
                     # Display apartment photos
                     if apt.get('photo_urls'):
-                        st.image(apt['photo_urls'], width=200)
-                    
-                    st.button(f"Rent Apartment - {apt['id']}", key=f"rent_{apt['id']}")
+                        for photo_url in apt['photo_urls']:
+                            st.image(photo_url, width=200)
+
+                    # Handle Rent button click
+                    if st.button(f"Rent Apartment - {apt['id']}", key=f"rent_{apt['id']}"):
+                        try:
+                            rent_response = requests.post(
+                                f"{BASE_URL}/contracts/initiate",
+                                json={
+                                    "tenant_wallet": st.session_state.wallet_address,
+                                    "landlord_wallet": apt["landlord_wallet"],
+                                    "apartment_id": apt["id"],
+                                    "rent_amount": int(apt["rent_amount_eth"] * 10**18), 
+                                    "lease_duration": apt["lease_duration"]
+                                },
+                                headers=get_headers()
+                            )
+
+                            if rent_response.status_code == 200:
+                                st.success(f"Successfully initiated rental for '{apt['title']}'!")
+                            else:
+                                st.error(rent_response.json().get("error", "Failed to initiate rental process."))
+                        except requests.RequestException as e:
+                            st.error(f"Network error occurred: {e}")
+                        except Exception as e:
+                            st.error(f"An unexpected error occurred: {e}")
+
                     st.markdown("---")
-            
+
             else:
                 st.error(f"Failed to load apartments. Error: {response.text}")
-        
+
         except requests.RequestException as e:
             st.error(f"Network error occurred: {e}")
         except Exception as e:
@@ -410,7 +539,33 @@ def tenant_dashboard():
     # My Contracts
     with tab2:
         st.subheader("My Contracts")
-        st.info("Contract functionality coming soon!")
+        tab1, tab2 = st.tabs(["Pending Contracts", "Signed Contracts"])
+
+# Fetch and display pending contracts
+    with tab1:
+     st.subheader("Pending Contracts")
+     contracts = fetch_contracts("tenant-contracts?status=pending")
+     for contract in contracts:
+        st.write(f"**Landlord Wallet:** {contract['landlord_wallet']}")
+        st.write(f"**Apartment ID:** {contract['apartment_id']}")
+        st.write(f"**Status:** {contract['status']}")
+        if contract['status'] == 'Pending':
+            st.info("Waiting for Landlord to Sign")
+            if st.button(f"Sign Contract #{contract['id']}", key=f"sign_{contract['id']}"):
+                sign_agreement(contract['apartment_id'], "Tenant")
+
+# Fetch and display signed contracts
+    with tab2:
+     st.subheader("Signed Contracts")
+     contracts = fetch_contracts("tenant-contracts?status=Landlord Signed")
+     for contract in contracts:
+        st.write(f"**Landlord Wallet:** {contract['landlord_wallet']}")
+        st.write(f"**Apartment ID:** {contract['apartment_id']}")
+        st.write(f"**Status:** {contract['status']}")
+        if contract['status'] == 'Landlord Signed':
+            st.write(f"**Next Payment Due:** {contract.get('next_payment_due', 'Not Specified')}")
+            if st.button(f"Make Payment #{contract['id']}", key=f"pay_{contract['id']}"):
+                make_payment(contract['apartment_id'], contract['rent_amount_eth'])
 
     # My Profile
     with tab3:
@@ -435,7 +590,7 @@ def tenant_dashboard():
                         "phone": phone
                     }
                 )
-                
+
                 if response.status_code == 200:
                     st.success("Profile updated successfully!")
                     # Update session state
@@ -443,11 +598,12 @@ def tenant_dashboard():
                     st.session_state.user["phone"] = phone
                 else:
                     st.error(response.json().get("error", "Failed to update profile."))
-            
+
             except requests.RequestException as e:
                 st.error(f"Network error: {e}")
             except Exception as e:
                 st.error(f"An unexpected error occurred: {e}")
+
 # Routing Logic
 if not st.session_state.get("logged_in", False):
     landing_page()

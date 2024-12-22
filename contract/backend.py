@@ -10,7 +10,7 @@ import time
 from dotenv import load_dotenv
 from flask import send_from_directory
 from werkzeug.utils import secure_filename
-
+from solcx import compile_source, install_solc
 
 # Load environment variables
 load_dotenv()
@@ -90,9 +90,11 @@ def init_db():
             landlord_wallet TEXT NOT NULL,
             tenant_wallet TEXT NOT NULL,
             apartment_id INTEGER NOT NULL,
-            start_date TEXT NOT NULL,
-            end_date TEXT NOT NULL,
-            contract_hash TEXT NOT NULL,
+            start_date TEXT,
+            end_date TEXT,
+            contract_hash TEXT,
+            status TEXT NOT NULL DEFAULT 'Pending',
+            contract_address TEXT, -- Column for the smart contract address
             FOREIGN KEY (apartment_id) REFERENCES apartments (id) ON DELETE CASCADE
         )
     ''')
@@ -264,23 +266,6 @@ def add_apartment():
             photo.save(photo_path)
             photo_urls.append(f"{request.host_url}uploads/{photo_filename}")
 
-        # Interact with the smart contract to create agreement details
-        nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
-        tx = rental_contract.functions.setAgreementDetails(
-            int(Web3.to_wei(rent_amount_eth, 'ether')),  # Rent amount in ETH converted to wei
-            lease_duration
-        ).build_transaction({
-            'from': ACCOUNT_ADDRESS,
-            'nonce': nonce,
-            'gas': 150000,
-            'gasPrice': web3.to_wei('20', 'gwei')
-        })
-
-        # Sign and send the transaction
-        signed_tx = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-
         # Save apartment details to the database
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
@@ -288,10 +273,10 @@ def add_apartment():
             INSERT INTO apartments (
                 landlord_wallet, location, title, description, price_in_jod, rent_amount_eth, lease_duration, availability, contract_address
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (landlord_wallet, location, title, description, price_in_jod, rent_amount_eth, lease_duration, availability, rental_contract.address))
+        ''', (landlord_wallet, location, title, description, price_in_jod, rent_amount_eth, lease_duration, availability, None))
         apartment_id = cursor.lastrowid
 
-        # Save photo URLs to apartment_photos table
+        # Save photo URLs to the apartment_photos table
         for photo_url in photo_urls:
             cursor.execute('''
                 INSERT INTO apartment_photos (apartment_id, photo_url) VALUES (?, ?)
@@ -306,13 +291,69 @@ def add_apartment():
             "apartment_id": apartment_id,
             "price_in_jod": price_in_jod,
             "rent_amount_eth": rent_amount_eth,
-            "contract_address": rental_contract.address,
-            "transaction_hash": web3.to_hex(tx_hash),
             "photo_urls": photo_urls
         }), 200
 
     except Exception as e:
         print(f"Error: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+    
+@app.route('/tenant-contracts', methods=['GET'])
+def get_tenant_contracts():
+    try:
+        token = request.headers.get("Authorization")
+        if not token:
+            return jsonify({"error": "Authorization header missing"}), 401
+
+        decoded = decode_token(token.split("Bearer ")[-1])
+        if not decoded:
+            return jsonify({"error": "Invalid or expired token"}), 401
+
+        tenant_wallet = decoded.get("wallet_address")
+        status = request.args.get("status", "all")  # Get status query parameter
+
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+
+        # Adjust query based on status
+        if status == "pending":
+            query = '''
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.status
+                FROM contracts c
+                WHERE c.tenant_wallet = ? AND c.status = "Pending"
+            '''
+        elif status == "signed":
+            query = '''
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.status
+                FROM contracts c
+                WHERE c.tenant_wallet = ? AND c.status IN ("Active", "Completed")
+            '''
+        else:
+            query = '''
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.status
+                FROM contracts c
+                WHERE c.tenant_wallet = ?
+            '''
+
+        cursor.execute(query, (tenant_wallet,))
+        contracts = cursor.fetchall()
+
+        # Format contracts for response
+        contracts_list = [
+            {
+                "id": contract[0],
+                "landlord_wallet": contract[1],
+                "apartment_id": contract[2],
+                "status": contract[3]
+            }
+            for contract in contracts
+        ]
+
+        conn.close()
+        return jsonify(contracts_list), 200
+
+    except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/landlord-contracts', methods=['GET'])
@@ -434,22 +475,23 @@ def delete_apartment(apartment_id):
 @app.route('/landlord-apartments', methods=['GET'])
 def landlord_apartments():
     try:
+        # Check for Authorization header
         token = request.headers.get("Authorization")
         if not token:
             return jsonify({"error": "Authorization header missing"}), 401
 
+        # Decode the token
         decoded = decode_token(token.split("Bearer ")[-1])
-        if not decoded or "error" in decoded:
-            return jsonify(decoded or {"error": "Invalid or expired token"}), 401
+        if not decoded:
+            return jsonify({"error": "Invalid or expired token"}), 401
 
         landlord_wallet = decoded.get("wallet_address")
         if not landlord_wallet:
             return jsonify({"error": "Unauthorized access"}), 403
 
+        # Connect to database and fetch apartments
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-
-        # Query apartments
         cursor.execute('''
             SELECT id, landlord_wallet, title, location, description, price_in_jod, 
                    rent_amount_eth, lease_duration, availability, contract_address
@@ -460,27 +502,36 @@ def landlord_apartments():
         apartments_list = []
         for apt in apartments:
             apt_id = apt[0]
+
+            # Fetch photo URLs for the apartment
             cursor.execute('SELECT photo_url FROM apartment_photos WHERE apartment_id = ?', (apt_id,))
             photos = cursor.fetchall()
             photo_urls = [photo[0] for photo in photos]  # Extract photo URLs
 
+            # Append apartment details to the list
             apartments_list.append({
                 "id": apt_id,
                 "landlord_wallet": apt[1],
                 "title": apt[2],
                 "location": apt[3],
                 "description": apt[4],
-                "price_in_jod": apt[5],  # Include price in JOD
-                "rent_amount_eth": apt[6],  # Include rent amount in ETH
+                "price_in_jod": apt[5],
+                "rent_amount_eth": apt[6],
                 "lease_duration": apt[7],
                 "availability": apt[8],
-                "contract_address": apt[9],
-                "photo_urls": photo_urls  # Include photo URLs in the response
+                "contract_address": apt[9] if apt[9] else "Not Available",  # Handle None gracefully
+                "photo_urls": photo_urls
             })
 
         conn.close()
         return jsonify(apartments_list), 200
+
+    except sqlite3.Error as db_err:
+        print(f"Database error: {db_err}")
+        return jsonify({"error": "Database error"}), 500
+
     except Exception as e:
+        print(f"Unexpected error: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/available-apartments', methods=['GET'])
@@ -514,7 +565,7 @@ def available_apartments():
                 "rent_amount_eth": apt[6],
                 "lease_duration": apt[7],
                 "availability": apt[8],
-                "contract_address": apt[9],
+                "contract_address": apt[9] if apt[9] else "Not Available",
                 "photo_urls": photo_urls  # Include photo URLs in the response
             })
 
@@ -528,6 +579,201 @@ def available_apartments():
     except Exception as e:
         print(f"Error fetching apartments: {str(e)}")
         return jsonify({"error": "Internal server error"}), 500
+
+## Routes
+@app.route('/contracts/initiate', methods=['POST'])
+def initiate_contract():
+    try:
+        data = request.json
+        tenant_wallet = Web3.to_checksum_address(data['tenant_wallet'])
+        landlord_wallet = Web3.to_checksum_address(data['landlord_wallet'])
+        rent_amount = int(data['rent_amount'])  # Rent amount in Wei
+        lease_duration = int(data['lease_duration'])  # Duration in months
+
+        # Compile and deploy the contract
+        compiled_contract_path = "RentalAgreement.sol"
+        with open(compiled_contract_path, 'r') as file:
+            contract_source_code = file.read()
+
+        compiled_sol = compile_source(contract_source_code, solc_version='0.8.0')
+        contract_id, contract_interface = compiled_sol.popitem()
+
+        abi = contract_interface['abi']
+        bytecode = contract_interface['bin']
+        contract = web3.eth.contract(abi=abi, bytecode=bytecode)
+
+        # Build the constructor transaction
+        nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
+        tx = contract.constructor(
+            landlord_wallet,
+            rent_amount,
+            lease_duration
+        ).build_transaction({
+            'from': ACCOUNT_ADDRESS,
+            'nonce': nonce,
+            'gas': 1500000,
+            'gasPrice': web3.to_wei('20', 'gwei')
+        })
+
+        # Sign and send the transaction
+        signed_tx = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+
+        # Save contract details to the database
+        contract_address = tx_receipt.contractAddress
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO contracts (landlord_wallet, tenant_wallet, rent_amount, lease_duration, contract_address, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (landlord_wallet, tenant_wallet, rent_amount, lease_duration, contract_address, 'Pending'))
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "message": "Contract initiated successfully",
+            "contract_address": contract_address,
+            "transaction_hash": web3.to_hex(tx_hash)
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+
+@app.route('/contracts/sign', methods=['POST'])
+def sign_contract():
+    try:
+        data = request.json
+        app.logger.info(f"Debug: Payload received: {data}")  # Log the payload
+        apartment_id = data['apartment_id']
+        wallet_address = data['wallet_address']
+        private_key = data['private_key']
+        user_role = data['role']
+
+        # Fetch the contract address
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT contract_address FROM contracts WHERE apartment_id = ?', (apartment_id,))
+        result = cursor.fetchone()
+
+        if not result:
+            app.logger.error(f"Debug: Contract not found for apartment_id: {apartment_id}")
+            return jsonify({"error": "Contract not found."}), 404
+
+        contract_address = result[0]
+        app.logger.info(f"Debug: Contract address: {contract_address}")
+
+        # Verify private key matches wallet
+        provided_account = web3.eth.account.from_key(private_key).address
+        if wallet_address.lower() != provided_account.lower():
+            app.logger.error("Debug: Private key does not match wallet address.")
+            return jsonify({"error": "Private key does not match the provided wallet address."}), 400
+
+        # Build and sign transaction
+        nonce = web3.eth.get_transaction_count(wallet_address)
+        tx = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI).functions.signAgreement().build_transaction({
+            'from': wallet_address,
+            'nonce': nonce,
+            'gas': 300000,
+            'gasPrice': web3.to_wei('20', 'gwei')
+        })
+        signed_tx = web3.eth.account.sign_transaction(tx, private_key)
+        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        web3.eth.wait_for_transaction_receipt(tx_hash)
+        app.logger.info(f"Debug: Transaction hash: {web3.to_hex(tx_hash)}")
+
+        # Update database
+        if user_role == 'Tenant':
+            cursor.execute('UPDATE apartments SET availability = ? WHERE id = ?', ('Unavailable', apartment_id))
+            cursor.execute('UPDATE contracts SET status = ? WHERE apartment_id = ?', ('tenant Signed', apartment_id))
+            app.logger.info(f"Debug: Tenant signed for apartment_id: {apartment_id}")
+        elif user_role == 'Landlord':
+            cursor.execute('UPDATE contracts SET status = ? WHERE apartment_id = ?', ('Landlord Signed', apartment_id))
+            app.logger.info(f"Debug: Landlord signed for apartment_id: {apartment_id}")
+        
+        conn.commit()
+        conn.close()
+
+        return jsonify({"message": "Contract signed successfully.", "transaction_hash": web3.to_hex(tx_hash)}), 200
+    except Exception as e:
+        app.logger.error(f"Error during sign_contract: {str(e)}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/contracts/pay', methods=['POST'])
+def make_payment():
+    try:
+        data = request.json
+        apartment_id = data['apartment_id']
+        payment_amount = data['payment_amount']
+
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT contract_address FROM contracts WHERE apartment_id = ?', (apartment_id,))
+        result = cursor.fetchone()
+
+        if not result:
+            return jsonify({"error": "Contract not found."}), 404
+
+        contract_address = result[0]
+        contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
+
+        nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
+        tx = contract.functions.makePayment().build_transaction({
+            'from': ACCOUNT_ADDRESS,
+            'value': web3.to_wei(payment_amount, 'ether'),
+            'nonce': nonce,
+            'gas': 300000,
+            'gasPrice': web3.to_wei('20', 'gwei')
+        })
+
+        signed_tx = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        web3.eth.wait_for_transaction_receipt(tx_hash)
+
+        return jsonify({"message": "Payment made successfully.", "transaction_hash": web3.to_hex(tx_hash)}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/contracts/terminate', methods=['POST'])
+def terminate_contract():
+    try:
+        data = request.json
+        apartment_id = data['apartment_id']
+
+        conn = sqlite3.connect(DATABASE_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT contract_address FROM contracts WHERE apartment_id = ?', (apartment_id,))
+        result = cursor.fetchone()
+
+        if not result:
+            return jsonify({"error": "Contract not found."}), 404
+
+        contract_address = result[0]
+        contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
+
+        nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
+        tx = contract.functions.terminateAgreement().build_transaction({
+            'from': ACCOUNT_ADDRESS,
+            'nonce': nonce,
+            'gas': 300000,
+            'gasPrice': web3.to_wei('20', 'gwei')
+        })
+
+        signed_tx = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        web3.eth.wait_for_transaction_receipt(tx_hash)
+
+        cursor.execute('UPDATE contracts SET status = ? WHERE apartment_id = ?', ('Terminated', apartment_id))
+        conn.commit()
+        conn.close()
+
+        return jsonify({"message": "Contract terminated successfully.", "transaction_hash": web3.to_hex(tx_hash)}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
 @app.route('/uploads/<filename>')
