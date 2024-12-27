@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 from flask import send_from_directory
 from werkzeug.utils import secure_filename
 from solcx import compile_source, install_solc
+from datetime import datetime, timedelta
+
 
 # Load environment variables
 load_dotenv()
@@ -90,11 +92,14 @@ def init_db():
             landlord_wallet TEXT NOT NULL,
             tenant_wallet TEXT NOT NULL,
             apartment_id INTEGER NOT NULL,
+            rent_amount REAL,
+            lease_duration INTEGER,
             start_date TEXT,
             end_date TEXT,
             contract_hash TEXT,
             status TEXT NOT NULL DEFAULT 'Pending',
             contract_address TEXT, -- Column for the smart contract address
+            next_payment_date TEXT,
             FOREIGN KEY (apartment_id) REFERENCES apartments (id) ON DELETE CASCADE
         )
     ''')
@@ -298,7 +303,6 @@ def add_apartment():
         print(f"Error: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-    
 @app.route('/tenant-contracts', methods=['GET'])
 def get_tenant_contracts():
     try:
@@ -319,19 +323,19 @@ def get_tenant_contracts():
         # Adjust query based on status
         if status == "pending":
             query = '''
-                SELECT c.id, c.landlord_wallet, c.apartment_id, c.status
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount
                 FROM contracts c
                 WHERE c.tenant_wallet = ? AND c.status = "Pending"
             '''
-        elif status == "signed":
+        elif status == "active":
             query = '''
-                SELECT c.id, c.landlord_wallet, c.apartment_id, c.status
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount
                 FROM contracts c
-                WHERE c.tenant_wallet = ? AND c.status IN ("Active", "Completed")
+                WHERE c.tenant_wallet = ? AND c.status = "Active"
             '''
         else:
             query = '''
-                SELECT c.id, c.landlord_wallet, c.apartment_id, c.status
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount
                 FROM contracts c
                 WHERE c.tenant_wallet = ?
             '''
@@ -345,7 +349,11 @@ def get_tenant_contracts():
                 "id": contract[0],
                 "landlord_wallet": contract[1],
                 "apartment_id": contract[2],
-                "status": contract[3]
+                "start_date": contract[3] if contract[3] else "Not Specified",
+                "end_date": contract[4] if contract[4] else "Not Specified",
+                "next_payment_due": contract[5] if contract[5] else "Not Specified",
+                "status": contract[6],
+                "rent_amount": contract[7]  # Include rent amount
             }
             for contract in contracts
         ]
@@ -368,17 +376,27 @@ def landlord_contracts():
             return jsonify({"error": "Invalid or expired token"}), 401
 
         landlord_wallet = decoded["wallet_address"]
+        status_filter = request.args.get("status")  # Get the status filter from query parameters
 
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
 
-        cursor.execute('''
+        # Build the SQL query dynamically based on the status filter
+        query = '''
             SELECT c.id, c.tenant_wallet, c.start_date, c.end_date, c.contract_hash, 
-                   c.apartment_id, a.title AS apartment_title, a.contract_address, c.status
+                   c.apartment_id, a.title AS apartment_title, a.contract_address, c.status,
+                   c.rent_amount, c.lease_duration
             FROM contracts c
             JOIN apartments a ON c.apartment_id = a.id
             WHERE a.landlord_wallet = ?
-        ''', (landlord_wallet,))
+        '''
+        params = [landlord_wallet]
+
+        if status_filter:
+            query += ' AND c.status = ?'
+            params.append(status_filter)
+
+        cursor.execute(query, params)
         contracts = cursor.fetchall()
 
         contracts_list = [
@@ -391,7 +409,9 @@ def landlord_contracts():
                 "apartment_id": contract[5],
                 "apartment_title": contract[6],
                 "contract_address": contract[7],
-                "status": contract[8]
+                "status": contract[8],
+                "rent_amount": contract[9],
+                "lease_duration": contract[10]
             }
             for contract in contracts
         ]
@@ -581,89 +601,110 @@ def available_apartments():
         return jsonify({"error": "Internal server error"}), 500
 
 ## Routes
+
+
 @app.route('/contracts/initiate', methods=['POST'])
 def initiate_contract():
     try:
         data = request.json
         tenant_wallet = Web3.to_checksum_address(data['tenant_wallet'])
-        landlord_wallet = Web3.to_checksum_address(data['landlord_wallet'])
-        rent_amount = int(data['rent_amount'])  # Rent amount in Wei
-        lease_duration = int(data['lease_duration'])  # Duration in months
+        apartment_id = int(data.get('apartment_id'))
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
 
-        # Compile and deploy the contract
-        compiled_contract_path = "RentalAgreement.sol"
-        with open(compiled_contract_path, 'r') as file:
-            contract_source_code = file.read()
+        # Validate the input
+        if not all([apartment_id, start_date, end_date]):
+            return jsonify({"error": "Apartment ID, start_date, and end_date are required"}), 400
 
-        compiled_sol = compile_source(contract_source_code, solc_version='0.8.0')
-        contract_id, contract_interface = compiled_sol.popitem()
+        # Convert dates to datetime objects
+        try:
+            start_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
+            end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
 
-        abi = contract_interface['abi']
-        bytecode = contract_interface['bin']
-        contract = web3.eth.contract(abi=abi, bytecode=bytecode)
+        # Ensure the rental period is at least 1 month
+        rental_period_days = (end_date_obj - start_date_obj).days
+        if rental_period_days < 30:
+            return jsonify({"error": "The rental period must be at least 1 month."}), 400
 
-        # Build the constructor transaction
-        nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
-        tx = contract.constructor(
-            landlord_wallet,
-            rent_amount,
-            lease_duration
-        ).build_transaction({
-            'from': ACCOUNT_ADDRESS,
-            'nonce': nonce,
-            'gas': 1500000,
-            'gasPrice': web3.to_wei('20', 'gwei')
-        })
-
-        # Sign and send the transaction
-        signed_tx = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-
-        # Save contract details to the database
-        contract_address = tx_receipt.contractAddress
+        # Connect to the database
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
+
+        # Fetch apartment details
         cursor.execute('''
-            INSERT INTO contracts (landlord_wallet, tenant_wallet, rent_amount, lease_duration, contract_address, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (landlord_wallet, tenant_wallet, rent_amount, lease_duration, contract_address, 'Pending'))
+            SELECT id, landlord_wallet, rent_amount_eth, lease_duration 
+            FROM apartments 
+            WHERE id = ?
+        ''', (apartment_id,))
+        apartment_details = cursor.fetchone()
+
+        if not apartment_details:
+            return jsonify({"error": "Apartment not found"}), 404
+
+        fetched_apartment_id, landlord_wallet, rent_amount_eth, lease_duration = apartment_details
+        lease_duration = int(lease_duration)
+
+        # Ensure the fetched apartment ID matches the provided ID
+        if fetched_apartment_id != apartment_id:
+            return jsonify({"error": "Apartment ID mismatch detected"}), 400
+
+        # Save contract details to the database
+        next_payment_date = start_date_obj + timedelta(days=30)
+
+        cursor.execute('''
+            INSERT INTO contracts (
+                landlord_wallet, tenant_wallet, apartment_id, rent_amount, lease_duration, 
+                start_date, end_date, next_payment_date, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (landlord_wallet, tenant_wallet, fetched_apartment_id, rent_amount_eth, lease_duration,
+              start_date, end_date, next_payment_date.strftime('%Y-%m-%d'), 'Pending'))
         conn.commit()
         conn.close()
 
         return jsonify({
-            "message": "Contract initiated successfully",
-            "contract_address": contract_address,
-            "transaction_hash": web3.to_hex(tx_hash)
+            "message": "Contract details saved successfully. Deployment will occur upon signing.",
+            "landlord": landlord_wallet,
+            "tenant": tenant_wallet,
+            "apartment_id": fetched_apartment_id,
+            "rent_amount_eth": rent_amount_eth,
+            "lease_duration": lease_duration,
+            "start_date": start_date,
+            "end_date": end_date,
+            "next_payment_date": next_payment_date.strftime('%Y-%m-%d')
         }), 200
 
+    except sqlite3.Error as db_error:
+        app.logger.error(f"Database error: {db_error}")
+        return jsonify({"error": "Database error occurred"}), 500
     except Exception as e:
+        app.logger.error(f"Unexpected error: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-
-
+    
 @app.route('/contracts/sign', methods=['POST'])
 def sign_contract():
     try:
         data = request.json
-        app.logger.info(f"Debug: Payload received: {data}")  # Log the payload
+        app.logger.info(f"Debug: Payload received: {data}")
         apartment_id = data['apartment_id']
         wallet_address = data['wallet_address']
         private_key = data['private_key']
         user_role = data['role']
 
-        # Fetch the contract address
+        # Fetch the contract address and current status
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-        cursor.execute('SELECT contract_address FROM contracts WHERE apartment_id = ?', (apartment_id,))
+        cursor.execute('SELECT contract_address, status, start_date, landlord_wallet, tenant_wallet, rent_amount, lease_duration FROM contracts WHERE apartment_id = ?', (apartment_id,))
         result = cursor.fetchone()
 
         if not result:
             app.logger.error(f"Debug: Contract not found for apartment_id: {apartment_id}")
             return jsonify({"error": "Contract not found."}), 404
 
-        contract_address = result[0]
-        app.logger.info(f"Debug: Contract address: {contract_address}")
+        contract_address, current_status, start_date, landlord_wallet, tenant_wallet, rent_amount, lease_duration = result
+        app.logger.info(f"Debug: Contract address: {contract_address}, Current status: {current_status}")
 
         # Verify private key matches wallet
         provided_account = web3.eth.account.from_key(private_key).address
@@ -671,58 +712,168 @@ def sign_contract():
             app.logger.error("Debug: Private key does not match wallet address.")
             return jsonify({"error": "Private key does not match the provided wallet address."}), 400
 
+        # Initialize new_status to avoid unassigned variable errors
+        new_status = None
+
         # Build and sign transaction
         nonce = web3.eth.get_transaction_count(wallet_address)
-        tx = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI).functions.signAgreement().build_transaction({
-            'from': wallet_address,
-            'nonce': nonce,
-            'gas': 300000,
-            'gasPrice': web3.to_wei('20', 'gwei')
-        })
-        signed_tx = web3.eth.account.sign_transaction(tx, private_key)
-        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        web3.eth.wait_for_transaction_receipt(tx_hash)
-        app.logger.info(f"Debug: Transaction hash: {web3.to_hex(tx_hash)}")
 
-        # Update database
-        if user_role == 'Tenant':
+        if user_role == 'Landlord' and current_status == 'Pending':
+            # Landlord deploys the contract
+            compiled_contract_path = "RentalAgreement.sol"
+            with open(compiled_contract_path, 'r') as file:
+                contract_source_code = file.read()
+
+            compiled_sol = compile_source(contract_source_code, solc_version='0.8.0')
+            contract_id, contract_interface = compiled_sol.popitem()
+
+            abi = contract_interface['abi']
+            bytecode = contract_interface['bin']
+            contract = web3.eth.contract(abi=abi, bytecode=bytecode)
+
+            tx = contract.constructor(
+                Web3.to_checksum_address(landlord_wallet),
+                Web3.to_checksum_address(tenant_wallet),  # Include tenant address in deployment
+                int(float(rent_amount) * 10**18),
+                lease_duration
+            ).build_transaction({
+                'from': wallet_address,
+                'nonce': nonce,
+                'gas': 1500000,
+                'gasPrice': web3.to_wei('20', 'gwei')
+            })
+
+            signed_tx = web3.eth.account.sign_transaction(tx, private_key)
+            tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+
+            contract_address = tx_receipt.contractAddress
+            contract = web3.eth.contract(address=contract_address, abi=abi)
+
+            # Landlord signs the contract
+            tx_sign = contract.functions.signAgreement().build_transaction({
+                'from': wallet_address,
+                'nonce': nonce + 1,  # Increment nonce for signing
+                'gas': 300000,
+                'gasPrice': web3.to_wei('20', 'gwei')
+            })
+            signed_tx_sign = web3.eth.account.sign_transaction(tx_sign, private_key)
+            tx_sign_hash = web3.eth.send_raw_transaction(signed_tx_sign.raw_transaction)
+            web3.eth.wait_for_transaction_receipt(tx_sign_hash)
+
+            # Verify isSigned is updated
+            is_signed = contract.functions.isSigned().call()
+            app.logger.info(f"Debug: isSigned after landlord signing: {is_signed}")
+
+            new_status = 'Landlord Signed'
+
+            # Update the contract address and status in the database
+            cursor.execute('UPDATE contracts SET contract_address = ?, status = ? WHERE apartment_id = ?', 
+                           (contract_address, new_status, apartment_id))
+            app.logger.info(f"Debug: Contract deployed and signed at {contract_address}")
+
+        if user_role == 'Tenant' and current_status == 'Landlord Signed':
+            # Tenant signing
+            contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
+
+            tx = contract.functions.signAgreement().build_transaction({
+                'from': wallet_address,
+                'nonce': nonce,
+                'gas': 300000,
+                'gasPrice': web3.to_wei('20', 'gwei')
+            })
+            signed_tx = web3.eth.account.sign_transaction(tx, private_key)
+            tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+
+            # Debugging: Fetch the state from the smart contract
+            contract_state = contract.functions.state().call()
+            is_signed = contract.functions.isSigned().call()
+            app.logger.info(f"Debug: Contract state after tenant signing: {contract_state}, isSigned: {is_signed}")
+
+            if contract_state == 1:  # Active state
+                new_status = 'Active'
+                app.logger.info(f"Debug: Contract is now active for apartment_id: {apartment_id}")
+
+        if user_role == 'Tenant' and current_status == 'Active':
+            # Tenant paying
+            contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
+
+            # Fetch rent amount from the database
+            payment_amount = int(float(rent_amount) * 10**18)  # Convert rent amount to Wei
+            app.logger.info(f"Debug: Payment amount calculated as {payment_amount} Wei")
+
+            tx = contract.functions.makePayment().build_transaction({
+                'from': wallet_address,
+                'value': payment_amount,  # Set payment amount here
+                'nonce': nonce,
+                'gas': 300000,
+                'gasPrice': web3.to_wei('20', 'gwei')
+            })
+            signed_tx = web3.eth.account.sign_transaction(tx, private_key)
+            tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+
+            # Debugging: Fetch the state from the smart contract
+            contract_state = contract.functions.state().call()
+            app.logger.info(f"Debug: Contract state after payment: {contract_state}")
+
+            # Update next payment date
+            from datetime import datetime, timedelta
+            start_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
+            next_payment_date = start_date_obj + timedelta(days=30)
+            cursor.execute('UPDATE contracts SET next_payment_date = ? WHERE apartment_id = ?', 
+                           (next_payment_date.strftime('%Y-%m-%d'), apartment_id))
+            app.logger.info(f"Debug: Next payment date set to {next_payment_date}")
+
+        # Ensure new_status is set before updating
+        if new_status:
+            cursor.execute('UPDATE contracts SET status = ? WHERE apartment_id = ?', (new_status, apartment_id))
+            app.logger.info(f"Debug: Updated contract status to '{new_status}' for apartment_id: {apartment_id}")
+
+        # Optionally update apartment availability if the contract becomes active
+        if new_status == 'Active':
             cursor.execute('UPDATE apartments SET availability = ? WHERE id = ?', ('Unavailable', apartment_id))
-            cursor.execute('UPDATE contracts SET status = ? WHERE apartment_id = ?', ('tenant Signed', apartment_id))
-            app.logger.info(f"Debug: Tenant signed for apartment_id: {apartment_id}")
-        elif user_role == 'Landlord':
-            cursor.execute('UPDATE contracts SET status = ? WHERE apartment_id = ?', ('Landlord Signed', apartment_id))
-            app.logger.info(f"Debug: Landlord signed for apartment_id: {apartment_id}")
-        
+
         conn.commit()
         conn.close()
 
-        return jsonify({"message": "Contract signed successfully.", "transaction_hash": web3.to_hex(tx_hash)}), 200
+        return jsonify({
+            "message": "Contract signed successfully.",
+            "transaction_hash": web3.to_hex(tx_hash),
+            "new_status": new_status
+        }), 200
+
     except Exception as e:
         app.logger.error(f"Error during sign_contract: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 @app.route('/contracts/pay', methods=['POST'])
 def make_payment():
     try:
         data = request.json
         apartment_id = data['apartment_id']
-        payment_amount = data['payment_amount']
 
+        # Connect to the database and fetch contract details
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-        cursor.execute('SELECT contract_address FROM contracts WHERE apartment_id = ?', (apartment_id,))
+        cursor.execute('SELECT contract_address, rent_amount FROM contracts WHERE apartment_id = ?', (apartment_id,))
         result = cursor.fetchone()
 
         if not result:
             return jsonify({"error": "Contract not found."}), 404
 
-        contract_address = result[0]
+        contract_address, rent_amount = result
         contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
+
+        # Calculate payment amount from the database
+        payment_amount = int(float(rent_amount) * 10**18)  # Convert rent amount to Wei
 
         nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
         tx = contract.functions.makePayment().build_transaction({
             'from': ACCOUNT_ADDRESS,
-            'value': web3.to_wei(payment_amount, 'ether'),
+            'value': payment_amount,
             'nonce': nonce,
             'gas': 300000,
             'gasPrice': web3.to_wei('20', 'gwei')
