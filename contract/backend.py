@@ -10,30 +10,25 @@ import time
 from dotenv import load_dotenv
 from flask import send_from_directory
 from werkzeug.utils import secure_filename
-from solcx import compile_source, install_solc
+from solcx import compile_source
 from datetime import datetime, timedelta
-
+from decimal import Decimal
 
 # Load environment variables
 load_dotenv()
 
-INFURA_URL = os.getenv("INFURA_URL")
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")
+GANACHE_URL = os.getenv("GANACHE_URL")
 JWT_SECRET = os.getenv("JWT_SECRET")
 
 # Connect to Ethereum blockchain
-web3 = Web3(Web3.HTTPProvider(INFURA_URL))
+web3 = Web3(Web3.HTTPProvider(GANACHE_URL))
 if not web3.is_connected():
     raise Exception("Failed to connect to Ethereum network.")
 
-ACCOUNT_ADDRESS = web3.eth.account.from_key(PRIVATE_KEY).address
 
 # Load Smart Contract ABI
 with open("RentalAgreementABI.json") as abi_file:
     CONTRACT_ABI = json.load(abi_file)
-
-rental_contract = web3.eth.contract(address=Web3.to_checksum_address(CONTRACT_ADDRESS), abi=CONTRACT_ABI)
 
 # Flask app initialization
 app = Flask(__name__)
@@ -900,10 +895,10 @@ def make_payment():
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+
 @app.route('/contracts/terminate', methods=['POST'])
 def terminate_contract():
     try:
-        # Parse request data
         data = request.json
         apartment_id = data['apartment_id']
         role = data['role']
@@ -929,27 +924,25 @@ def terminate_contract():
 
         contract_address, rent_amount = result
         contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
+        
+        rent_amount_decimal = Decimal(str(rent_amount))  # Ensure exact value
+        refund_amount_wei = int(rent_amount_decimal * Decimal(10**18))
 
-        # Convert rent amount to Wei
-        refund_amount = web3.to_wei(rent_amount, 'ether')
-        app.logger.info(f"Debug: Refund amount in Wei: {refund_amount}")
+        
 
         # Build the transaction to call terminateAgreement
         nonce = web3.eth.get_transaction_count(wallet_address)
         tx = contract.functions.terminateAgreement().build_transaction({
             'from': wallet_address,
-            'value': refund_amount,  # Include the refund amount
+            'value': refund_amount_wei,  # Set the refund amount
             'nonce': nonce,
             'gas': 300000,
             'gasPrice': web3.to_wei('20', 'gwei')
         })
-        app.logger.info(f"Debug: Transaction built: {tx}")
 
         # Sign and send the transaction
         signed_tx = web3.eth.account.sign_transaction(tx, private_key)
-        app.logger.info("Debug: Transaction signed")
         tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        app.logger.info(f"Debug: Transaction sent, hash: {web3.to_hex(tx_hash)}")
         tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
 
         if tx_receipt.status != 1:
@@ -965,13 +958,9 @@ def terminate_contract():
             "transaction_hash": web3.to_hex(tx_hash)
         }), 200
 
-    except ValueError as e:
-        app.logger.error(f"ValueError during contract termination: {str(e)}")
-        return jsonify({"error": f"ValueError: {str(e)}"}), 500
-
     except Exception as e:
-        app.logger.error(f"Unexpected error during contract termination: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 
 @app.route('/uploads/<filename>')

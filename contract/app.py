@@ -3,7 +3,7 @@ import requests
 
 # Constants
 BASE_URL = "http://localhost:5000"  # Backend API URL
-ETH_TO_JOD_RATE = 1000  # Example conversion rate, adjust as needed
+
 
 # Initialize session state
 if "logged_in" not in st.session_state:
@@ -169,19 +169,6 @@ def sign_agreement(apartment_id, role):
                 st.error(f"Error: {str(e)}")
 
 
-def render_apartment_details(apartment):
-    """Displays details for a single apartment."""
-    st.image(apartment.get("image_url", "background.jpg"), use_container_width=True)
-    st.write(f"*Title:* {apartment['title']}")
-    st.write(f"*Location:* {apartment['location']}")
-    st.write(f"*Rent:* {apartment['rent_amount']} ETH")
-    rent_price_jod = apartment['rent_amount'] * ETH_TO_JOD_RATE
-    st.write(f"*Rent in JOD:* {rent_price_jod:.2f} JOD")
-    st.write(f"*Lease Duration:* {apartment['lease_duration']} months")
-    if apartment["is_available"]:
-        if st.button(f"Rent {apartment['title']}"):
-            sign_agreement(apartment["id"], apartment["contract_address"], rent_price_jod)
-
 
 def fetch_contracts(endpoint):
     response = requests.get(f"{BASE_URL}/{endpoint}", headers=get_headers())
@@ -196,17 +183,6 @@ def fetch_contracts(endpoint):
         st.error(f"API Error {response.status_code}: {response.text}")
         return []
 
-def sign_contract(apartment_id, role):
-    payload = {
-        "apartment_id": apartment_id,
-        "wallet_address": st.session_state.wallet_address,
-        "role": role
-    }
-    response = requests.post(f"{BASE_URL}/contracts/sign", json=payload, headers=get_headers())
-    if response.status_code == 200:
-        st.success("Contract signed successfully.")
-    else:
-        st.error(response.json().get("error", "Failed to sign contract."))
 
 def make_payment(apartment_id, amount, unique_key):
     with st.form(f"payment_form_{apartment_id}_{unique_key}", clear_on_submit=True):  # Use unique_key for uniqueness

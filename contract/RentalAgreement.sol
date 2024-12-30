@@ -105,10 +105,8 @@ contract RentalAgreement {
         );
 
         if (state == ContractState.Active && msg.sender == landlord) {
-            // Calculate the refund amount
-            uint256 refund = (leaseDuration -
-                (block.timestamp - startDate) /
-                30 days) * rentAmount;
+            // Refund full month's rent
+            uint256 refund = rentAmount;
 
             require(msg.value == refund, "Incorrect refund amount sent."); // Ensure landlord sends exact refund amount
 
