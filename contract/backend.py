@@ -683,9 +683,11 @@ def initiate_contract():
         app.logger.error(f"Unexpected error: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     
+    
 @app.route('/contracts/sign', methods=['POST'])
 def sign_contract():
     try:
+        tx_hash = None 
         data = request.json
         app.logger.info(f"Debug: Payload received: {data}")
         apartment_id = data['apartment_id']
@@ -775,7 +777,12 @@ def sign_contract():
         if user_role == 'Tenant' and current_status == 'Landlord Signed':
             # Tenant signing
             contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
-
+            contract_state = contract.functions.state().call()
+            app.logger.info(f"Debug: Contract state before tenant signing: {contract_state}")
+            if contract_state != 0:  # Assuming 0 = Pending
+                 app.logger.error("Error: Contract is not in the Pending state.")
+                 return jsonify({"error": "Contract is not in the Pending state."}), 400
+            nonce = web3.eth.get_transaction_count(wallet_address)
             tx = contract.functions.signAgreement().build_transaction({
                 'from': wallet_address,
                 'nonce': nonce,
@@ -794,11 +801,11 @@ def sign_contract():
             if contract_state == 1:  # Active state
                 new_status = 'Active'
                 app.logger.info(f"Debug: Contract is now active for apartment_id: {apartment_id}")
-
+                current_status=new_status
         if user_role == 'Tenant' and current_status == 'Active':
             # Tenant paying
             contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
-
+            nonce = web3.eth.get_transaction_count(wallet_address)
             # Fetch rent amount from the database
             payment_amount = int(float(rent_amount) * 10**18)  # Convert rent amount to Wei
             app.logger.info(f"Debug: Payment amount calculated as {payment_amount} Wei")
@@ -848,12 +855,13 @@ def sign_contract():
         app.logger.error(f"Error during sign_contract: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-
 @app.route('/contracts/pay', methods=['POST'])
 def make_payment():
     try:
         data = request.json
         apartment_id = data['apartment_id']
+        wallet_address = data['wallet_address']
+        private_key = data['private_key']
 
         # Connect to the database and fetch contract details
         conn = sqlite3.connect(DATABASE_FILE)
@@ -870,16 +878,20 @@ def make_payment():
         # Calculate payment amount from the database
         payment_amount = int(float(rent_amount) * 10**18)  # Convert rent amount to Wei
 
-        nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
+        # Fetch the nonce for the tenant's wallet
+        nonce = web3.eth.get_transaction_count(wallet_address)
+
+        # Build the transaction
         tx = contract.functions.makePayment().build_transaction({
-            'from': ACCOUNT_ADDRESS,
+            'from': wallet_address,
             'value': payment_amount,
             'nonce': nonce,
             'gas': 300000,
             'gasPrice': web3.to_wei('20', 'gwei')
         })
 
-        signed_tx = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+        # Sign and send the transaction using the tenant's private key
+        signed_tx = web3.eth.account.sign_transaction(tx, private_key)
         tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
         web3.eth.wait_for_transaction_receipt(tx_hash)
 
@@ -891,39 +903,74 @@ def make_payment():
 @app.route('/contracts/terminate', methods=['POST'])
 def terminate_contract():
     try:
+        # Parse request data
         data = request.json
         apartment_id = data['apartment_id']
+        role = data['role']
+        wallet_address = data['wallet_address']
+        private_key = data.get('private_key')
 
+        if not private_key:
+            return jsonify({"error": "Private key is required."}), 400
+
+        # Verify that the private key matches the provided wallet address
+        provided_account = web3.eth.account.from_key(private_key).address
+        if provided_account.lower() != wallet_address.lower():
+            return jsonify({"error": "Private key does not match the provided wallet address."}), 400
+
+        # Fetch contract details
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
-        cursor.execute('SELECT contract_address FROM contracts WHERE apartment_id = ?', (apartment_id,))
+        cursor.execute('SELECT contract_address, rent_amount FROM contracts WHERE apartment_id = ?', (apartment_id,))
         result = cursor.fetchone()
 
         if not result:
             return jsonify({"error": "Contract not found."}), 404
 
-        contract_address = result[0]
+        contract_address, rent_amount = result
         contract = web3.eth.contract(address=contract_address, abi=CONTRACT_ABI)
 
-        nonce = web3.eth.get_transaction_count(ACCOUNT_ADDRESS)
+        # Convert rent amount to Wei
+        refund_amount = web3.to_wei(rent_amount, 'ether')
+        app.logger.info(f"Debug: Refund amount in Wei: {refund_amount}")
+
+        # Build the transaction to call terminateAgreement
+        nonce = web3.eth.get_transaction_count(wallet_address)
         tx = contract.functions.terminateAgreement().build_transaction({
-            'from': ACCOUNT_ADDRESS,
+            'from': wallet_address,
+            'value': refund_amount,  # Include the refund amount
             'nonce': nonce,
             'gas': 300000,
             'gasPrice': web3.to_wei('20', 'gwei')
         })
+        app.logger.info(f"Debug: Transaction built: {tx}")
 
-        signed_tx = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+        # Sign and send the transaction
+        signed_tx = web3.eth.account.sign_transaction(tx, private_key)
+        app.logger.info("Debug: Transaction signed")
         tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        web3.eth.wait_for_transaction_receipt(tx_hash)
+        app.logger.info(f"Debug: Transaction sent, hash: {web3.to_hex(tx_hash)}")
+        tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
 
+        if tx_receipt.status != 1:
+            raise Exception("Transaction failed on the blockchain.")
+
+        # Update the database to mark the contract as terminated
         cursor.execute('UPDATE contracts SET status = ? WHERE apartment_id = ?', ('Terminated', apartment_id))
         conn.commit()
         conn.close()
 
-        return jsonify({"message": "Contract terminated successfully.", "transaction_hash": web3.to_hex(tx_hash)}), 200
+        return jsonify({
+            "message": "Contract terminated successfully.",
+            "transaction_hash": web3.to_hex(tx_hash)
+        }), 200
+
+    except ValueError as e:
+        app.logger.error(f"ValueError during contract termination: {str(e)}")
+        return jsonify({"error": f"ValueError: {str(e)}"}), 500
 
     except Exception as e:
+        app.logger.error(f"Unexpected error during contract termination: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 

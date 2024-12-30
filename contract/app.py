@@ -208,32 +208,66 @@ def sign_contract(apartment_id, role):
     else:
         st.error(response.json().get("error", "Failed to sign contract."))
 
-def make_payment(apartment_id, amount):
-    payload = {
-        "apartment_id": apartment_id,
-        "payment_amount": amount
-    }
-    try:
-        response = requests.post(f"{BASE_URL}/contracts/pay", json=payload, headers=get_headers())
-        if response.status_code == 200:
-            st.success("Payment made successfully!")
-        else:
-            st.error(response.json().get("error", "Failed to make payment."))
-    except Exception as e:
-        st.error(f"An error occurred while making payment: {e}")
+def make_payment(apartment_id, amount, unique_key):
+    with st.form(f"payment_form_{apartment_id}_{unique_key}", clear_on_submit=True):  # Use unique_key for uniqueness
+        st.write(f"Make Payment for Apartment {apartment_id}")
+        private_key = st.text_input("Enter your private key", type="password", key=f"private_key_{apartment_id}_{unique_key}")
+        submitted = st.form_submit_button("Make Payment")
 
-def terminate_contract(apartment_id):
-    payload = {
-        "apartment_id": apartment_id
-    }
-    try:
-        response = requests.post(f"{BASE_URL}/contracts/terminate", json=payload, headers=get_headers())
-        if response.status_code == 200:
-            st.success("Contract terminated successfully!")
-        else:
-            st.error(response.json().get("error", "Failed to terminate contract."))
-    except Exception as e:
-        st.error(f"An error occurred while terminating the contract: {e}")
+        if submitted:
+            if not private_key or private_key.isspace():
+                st.error("Private key is required to make the payment!")
+                return
+
+            payload = {
+                "apartment_id": apartment_id,
+                "wallet_address": st.session_state.wallet_address,  # Ensure wallet address is included
+                "private_key": private_key,  # Include the private key for signing the transaction
+                "payment_amount": amount
+            }
+
+            try:
+                response = requests.post(f"{BASE_URL}/contracts/pay", json=payload, headers=get_headers())
+                if response.status_code == 200:
+                    st.success("Payment made successfully!")
+                else:
+                    error_message = response.json().get("error", "Failed to make payment.")
+                    st.error(f"Error: {error_message}")
+            except Exception as e:
+                st.error(f"An error occurred while making payment: {e}")
+
+def terminate_contract(apartment_id, role, unique_key):
+    with st.form(f"termination_form_{apartment_id}_{unique_key}", clear_on_submit=True):
+        st.write(f"Terminate Contract for Apartment {apartment_id}")
+        private_key = st.text_input("Enter your private key", type="password", key=f"private_key_{apartment_id}_{unique_key}_termination")
+        submitted = st.form_submit_button("Terminate Contract")
+
+        if submitted:
+            if not private_key or private_key.isspace():
+                st.error("Private key is required to terminate the contract!")
+                return
+
+            # Construct the payload
+            payload = {
+                "apartment_id": apartment_id,
+                "role": role,
+                "wallet_address": st.session_state.wallet_address,
+                "private_key": private_key
+            }
+
+            # Make the API request to terminate the contract
+            try:
+                response = requests.post(f"{BASE_URL}/contracts/terminate", json=payload, headers=get_headers())
+                if response.status_code == 200:
+                    st.success("Contract terminated successfully!")
+                    st.json(response.json())  # Optionally display the transaction details
+                else:
+                    error_message = response.json().get("error", "Failed to terminate contract.")
+                    st.error(f"Error: {error_message}")
+            except Exception as e:
+                st.error(f"An error occurred while terminating the contract: {e}")
+
+
 
 # Main Application
 st.set_page_config(page_title="Rental System", layout="wide")
@@ -429,6 +463,7 @@ def landlord_dashboard():
             st.subheader("Active Contracts")
             contracts = fetch_contracts("landlord-contracts?status=Active")
             for contract in contracts:
+                st.subheader(f"Apartment {contract['apartment_id']}")
                 st.write(f"**Tenant Wallet:** {contract['tenant_wallet']}")
                 st.write(f"**Apartment ID:** {contract['apartment_id']}")
                 st.write(f"**Start Date:** {contract['start_date']}")
@@ -436,6 +471,7 @@ def landlord_dashboard():
                 st.write(f"**Rent Amount:** {contract['rent_amount']} ETH")
                 st.write(f"**Lease Duration:** {contract['lease_duration']} months")
                 st.write(f"**Status:** {contract['status']}")
+                terminate_contract(contract['apartment_id'], 'Landlord',contract['id'])
                 
 
 
@@ -558,13 +594,16 @@ def tenant_dashboard():
             st.subheader("Active Contracts")
             contracts = fetch_contracts("tenant-contracts?status=Active")
             for contract in contracts:
+                st.subheader(f"Apartment {contract['apartment_id']}")
                 st.write(f"**Landlord Wallet:** {contract['landlord_wallet']}")
                 st.write(f"**Apartment ID:** {contract['apartment_id']}")
                 st.write(f"**Start Date:** {contract['start_date']}")
                 st.write(f"**End Date:** {contract['end_date']}")
                 st.write(f"**Next Payment Due:** {contract.get('next_payment_due', 'Not Specified')}")
-                if st.button(f"Make Payment #{contract['id']}", key=f"pay_{contract['id']}"):
-                    make_payment(contract['apartment_id'], contract['rent_amount'])
+                make_payment(contract['apartment_id'], contract['rent_amount'],contract['id'])
+                
+                terminate_contract(contract['apartment_id'], 'tenant',contract['id'])
+
 
     # My Profile
     with tab3:
