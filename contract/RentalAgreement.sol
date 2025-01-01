@@ -104,14 +104,16 @@ contract RentalAgreement {
             "Unauthorized."
         );
 
-        if (state == ContractState.Active && msg.sender == landlord) {
-            // Refund full month's rent
-            uint256 refund = rentAmount;
-
-            require(msg.value == refund, "Incorrect refund amount sent."); // Ensure landlord sends exact refund amount
-
-            // Transfer the refund to the tenant
-            payable(tenant).transfer(refund);
+        if (state == ContractState.Active) {
+            if (msg.sender == landlord) {
+                // Landlord terminates, refund the tenant
+                uint256 refund = rentAmount;
+                require(msg.value == refund, "Incorrect refund amount sent."); // Ensure landlord sends the exact refund amount
+                payable(tenant).transfer(refund);
+            } else if (msg.sender == tenant) {
+                // Tenant terminates, no refund required
+                require(msg.value == 0, "Tenant should not send funds."); // Ensure tenant sends no value
+            }
         }
 
         state = ContractState.Terminated;

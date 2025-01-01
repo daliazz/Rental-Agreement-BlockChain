@@ -743,7 +743,7 @@ def sign_contract():
             signed_tx = web3.eth.account.sign_transaction(tx, private_key)
             tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
             tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-
+            
             contract_address = tx_receipt.contractAddress
             contract = web3.eth.contract(address=contract_address, abi=abi)
 
@@ -761,6 +761,7 @@ def sign_contract():
             # Verify isSigned is updated
             is_signed = contract.functions.isSigned().call()
             app.logger.info(f"Debug: isSigned after landlord signing: {is_signed}")
+            
 
             new_status = 'Landlord Signed'
 
@@ -787,6 +788,13 @@ def sign_contract():
             signed_tx = web3.eth.account.sign_transaction(tx, private_key)
             tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
             tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+            # Process logs from the transaction receipt
+            try:
+               for log in tx_receipt.logs:
+                 decoded_log = contract.events.AgreementSigned().process_log(log)
+                 app.logger.info(f"Event Emitted: {decoded_log}")
+            except Exception as e:
+             app.logger.error(f"Error decoding event log: {str(e)}")
 
             # Debugging: Fetch the state from the smart contract
             contract_state = contract.functions.state().call()
@@ -928,13 +936,14 @@ def terminate_contract():
         rent_amount_decimal = Decimal(str(rent_amount))  # Ensure exact value
         refund_amount_wei = int(rent_amount_decimal * Decimal(10**18))
 
-        
+        app.logger.info(f"Role: {role}, Value: {0 if role == 'Tenant' else refund_amount_wei}")
+
 
         # Build the transaction to call terminateAgreement
         nonce = web3.eth.get_transaction_count(wallet_address)
         tx = contract.functions.terminateAgreement().build_transaction({
             'from': wallet_address,
-            'value': refund_amount_wei,  # Set the refund amount
+            'value': 0 if role == 'tenant' else refund_amount_wei,   # Set the refund amount
             'nonce': nonce,
             'gas': 300000,
             'gasPrice': web3.to_wei('20', 'gwei')
