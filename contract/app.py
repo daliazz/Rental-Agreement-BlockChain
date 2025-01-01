@@ -299,7 +299,7 @@ def landing_page():
     with tabs[0]:  # About Us Tab
         st.title("About Us")
         st.write("""
-        Welcome to our Rental Agreement Platform, where we simplify rental processes for both tenants and landlords. We believe in transparency, security, and efficiency in every transaction. Our platform leverages blockchain technology to ensure non-reputation of contracts while using familiar payment methods like Zain Cash and Metamask wallet to make renting accessible to everyone.
+        Welcome to our Rental Agreement Platform, where we simplify rental processes for both tenants and landlords. We believe in transparency, security, and efficiency in every transaction. Our platform leverages blockchain technology to ensure non-reputation of contracts
 
         Whether you’re a landlord looking to easily manage your property listings or a tenant searching for your next home, our system is designed to provide a seamless experience. By integrating blockchain to record all agreements and payments, we guarantee the safety and reliability of every interaction.
 
@@ -410,6 +410,7 @@ def landlord_dashboard():
             # Display Pending Contracts
             st.subheader("Pending Contracts")
             for contract in pending_contracts:
+              st.subheader(f"Apartment {contract['apartment_id']}")
               st.write(f"**Tenant Wallet:** {contract['tenant_wallet']}")
               st.write(f"**Apartment ID:** {contract['apartment_id']}")
               st.write(f"**Start Date:** {contract.get('start_date', 'Not Specified')}")
@@ -421,6 +422,7 @@ def landlord_dashboard():
             # Display Landlord Signed Contracts
             st.subheader("Landlord Signed Contracts")
             for contract in landlord_signed_contracts:
+             st.subheader(f"Apartment {contract['apartment_id']}")
              st.write(f"**Tenant Wallet:** {contract['tenant_wallet']}")
              st.write(f"**Apartment ID:** {contract['apartment_id']}")
              st.write(f"**Start Date:** {contract.get('start_date', 'Not Specified')}")
@@ -440,6 +442,7 @@ def landlord_dashboard():
             contracts = fetch_contracts("landlord-contracts?status=Active")
             for contract in contracts:
                 st.subheader(f"Apartment {contract['apartment_id']}")
+                st.write(f"**Contract Address:** {contract['contract_address']}")
                 st.write(f"**Tenant Wallet:** {contract['tenant_wallet']}")
                 st.write(f"**Apartment ID:** {contract['apartment_id']}")
                 st.write(f"**Start Date:** {contract['start_date']}")
@@ -571,6 +574,7 @@ def tenant_dashboard():
             contracts = fetch_contracts("tenant-contracts?status=Active")
             for contract in contracts:
                 st.subheader(f"Apartment {contract['apartment_id']}")
+                st.write(f"**Contract Address:** {contract['contract_address']}")
                 st.write(f"**Landlord Wallet:** {contract['landlord_wallet']}")
                 st.write(f"**Apartment ID:** {contract['apartment_id']}")
                 st.write(f"**Start Date:** {contract['start_date']}")

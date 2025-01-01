@@ -318,19 +318,19 @@ def get_tenant_contracts():
         # Adjust query based on status
         if status == "pending":
             query = '''
-                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount ,c.contract_address 
                 FROM contracts c
                 WHERE c.tenant_wallet = ? AND c.status = "Pending"
             '''
         elif status == "active":
             query = '''
-                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount,c.contract_address 
                 FROM contracts c
                 WHERE c.tenant_wallet = ? AND c.status = "Active"
             '''
         else:
             query = '''
-                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount
+                SELECT c.id, c.landlord_wallet, c.apartment_id, c.start_date, c.end_date, c.next_payment_date, c.status, c.rent_amount ,c.contract_address 
                 FROM contracts c
                 WHERE c.tenant_wallet = ?
             '''
@@ -348,7 +348,8 @@ def get_tenant_contracts():
                 "end_date": contract[4] if contract[4] else "Not Specified",
                 "next_payment_due": contract[5] if contract[5] else "Not Specified",
                 "status": contract[6],
-                "rent_amount": contract[7]  # Include rent amount
+                "rent_amount": contract[7],  # Include rent amount
+                "contract_address": contract[8]
             }
             for contract in contracts
         ]
